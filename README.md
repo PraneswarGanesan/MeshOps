@@ -1,7 +1,7 @@
-# Automesh.ai 🚀  
+# MeshOps 🚀  
 AI-Powered MLOps Testing & Deployment Platform
 
-We are in the devlopment phase
+We are in the development phase
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 ![Tech Stack](https://img.shields.io/badge/TechStack-Python%2C%20SpringBoot%2C%20React%2C%20AWS-orange)
