@@ -34,12 +34,11 @@ public class LlmService {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
+    // ===================== driver.py + tests.yaml (existing flow) =====================
+
     /**
-     * Generates driver.py + tests.yaml via Gemini and writes directly to S3.
-     * @param brief            user brief
-     * @param contextFromFiles concatenated contents from project files in S3
-     * @param s3Prefix         base S3 prefix for this project (e.g., pg/fraud-detection/pre-processed)
-     * @return Mono of the S3 keys where files are stored
+     * Generates driver.py + tests.yaml via LLM and writes directly to S3.
+     * Returns S3 keys map: {driverKey, testsKey}.
      */
     public Mono<Map<String, String>> generateAndSaveToS3(String brief, String contextFromFiles, String s3Prefix) {
         if (!StringUtils.hasText(apiKey) || !StringUtils.hasText(url)) {
@@ -92,7 +91,6 @@ public class LlmService {
                     - Include a second test that modifies the dataset to a single-class case and verifies no "Exception"
                       appears in output (thanks to zero_division=0).
                 
-
                 OUTPUT FORMAT STRICT:
                   1) First fenced block: ```python ...``` for driver.py
                   2) Second fenced block: ```yaml ...``` for tests.yaml
@@ -109,7 +107,6 @@ public class LlmService {
                 )
         );
 
-        // Build final URL (property already has ?key=)
         String finalUrl = url + apiKey;
 
         return webClient.post()
@@ -121,7 +118,69 @@ public class LlmService {
                 .map(resp -> parseAndSave(resp, s3Prefix));
     }
 
-    // --------------------------- Parsing & Saving ---------------------------
+    // ===================== NEW: tests-only generator (versioned) =====================
+
+    /**
+     * Generate only a tests.yaml (plain YAML text) and save it as:
+     *   <baseKey>/tests/tests_<label>.yaml
+     * Returns: { "versionKey": ..., "canonicalKey": ... }
+     * (Caller may choose to "activate" by copying versionKey → canonicalKey.)
+     */
+    public Map<String, String> generateTestsOnlyToS3(String brief,
+                                                     String contextFromFiles,
+                                                     String baseKey,
+                                                     String label) {
+        if (!StringUtils.hasText(apiKey) || !StringUtils.hasText(url)) {
+            throw new IllegalStateException("Gemini API key/URL not configured");
+        }
+
+        String prompt = String.format("""
+            You are given a user's ML project files:
+
+            ========= BEGIN USER FILES =========
+            %s
+            ========= END USER FILES =========
+
+            TASK: Produce ONLY a YAML test plan (no markdown code fences) that starts with:
+              tests:
+            Requirements:
+              - Include a main test that runs: python driver.py --base_dir=<dir>
+                and checks in output: "Model trained and saved to", "Predictions generated.",
+                "Accuracy:", "Precision:", "Recall:", "F1-score:"
+                and asserts files: <dir>/model.pkl and (if classification) <dir>/confusion_matrix.png
+              - Include at least one robustness test (e.g., single-class) and ensure no exceptions.
+              - Keep commands Ubuntu/Python3 friendly; do not install packages here.
+
+            User brief:
+            %s
+            """, contextFromFiles, brief);
+
+        Map<String, Object> body = Map.of(
+                "contents", List.of(Map.of("parts", List.of(Map.of("text", prompt))))
+        );
+        String finalUrl = url + apiKey;
+
+        String raw = webClient.post()
+                .uri(finalUrl)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .retrieve()
+                .bodyToMono(String.class)
+                .block();
+
+        String yaml = extractPlainText(raw);
+        if (!StringUtils.hasText(yaml)) {
+            yaml = "tests:\n  - name: placeholder\n    steps:\n      - run: \"python driver.py --base_dir=<dir>\"\n";
+        }
+
+        String versionKey = S3KeyUtil.join(S3KeyUtil.join(baseKey, "tests"), "tests_" + label + ".yaml");
+        String canonicalKey = S3KeyUtil.join(baseKey, "tests.yaml");
+
+        s3.putString(versionKey, yaml, "text/yaml");
+        return Map.of("versionKey", versionKey, "canonicalKey", canonicalKey);
+    }
+
+    // ===================== Internal: parse combined response & save to S3 =====================
 
     private Map<String, String> parseAndSave(String geminiJson, String s3Prefix) {
         String combined = extractAllTextFromGemini(geminiJson);
@@ -179,6 +238,8 @@ public class LlmService {
         return Map.of("driverKey", driverKey, "testsKey", testsKey);
     }
 
+    // ===================== Helpers: parse Gemini JSON & clean blocks =====================
+
     /** Extracts all text parts from Gemini JSON response and concatenates with newlines. */
     private String extractAllTextFromGemini(String geminiJson) {
         try {
@@ -216,6 +277,49 @@ public class LlmService {
         } catch (Exception e) {
             // If parsing fails, return raw
             return normalizeNewlines(geminiJson);
+        }
+    }
+
+    /** Extract plain text (no code fences) from Gemini JSON; normalize newlines. */
+    private String extractPlainText(String geminiJson) {
+        try {
+            JsonNode root = mapper.readTree(geminiJson);
+            StringBuilder sb = new StringBuilder();
+
+            JsonNode candidates = root.get("candidates");
+            if (candidates != null && candidates.isArray()) {
+                for (JsonNode cand : candidates) {
+                    JsonNode content = cand.get("content");
+                    if (content == null) continue;
+                    JsonNode parts = content.get("parts");
+                    if (parts != null && parts.isArray()) {
+                        for (JsonNode part : parts) {
+                            JsonNode textNode = part.get("text");
+                            if (textNode != null && !textNode.isNull()) {
+                                String t = textNode.asText("");
+                                if (StringUtils.hasText(t)) {
+                                    if (sb.length() > 0) sb.append("\n");
+                                    sb.append(t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (sb.length() == 0) {
+                String t = root.path("text").asText("");
+                if (StringUtils.hasText(t)) sb.append(t);
+            }
+
+            String out = normalizeNewlines(sb.toString()).trim();
+            // strip any accidental fenced blocks
+            out = out.replaceAll("(?s)```+.*?```+", "");
+            return out.trim();
+        } catch (Exception e) {
+            String out = normalizeNewlines(geminiJson);
+            out = out.replaceAll("(?s)```+.*?```+", "");
+            return out.trim();
         }
     }
 

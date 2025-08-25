@@ -78,4 +78,4 @@ This platform is designed to help ML practitioners, students, and enterprises te
 
 1. Clone the repo:
    ```bash
-   git clone https://github.com/yourusername/automesh.ai.git
+   git clone https://github.com/PraneswarGanesan/automesh.ai.git

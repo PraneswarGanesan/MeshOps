@@ -12,6 +12,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/runs")
 @RequiredArgsConstructor
+@CrossOrigin(origins = "*")
 public class RunController {
 
     private final RunService runService;
@@ -35,4 +36,10 @@ public class RunController {
     public List<ArtifactView> listArtifacts(@PathVariable Long runId) {
         return runService.listArtifacts(runId);
     }
+
+    @GetMapping("/{runId}/console")
+    public String getConsole(@PathVariable Long runId) {
+        return runService.getConsole(runId);
+    }
+
 }

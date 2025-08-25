@@ -16,7 +16,9 @@ import software.amazon.awssdk.services.ec2.model.*;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.CommandInvocationStatus;
 import software.amazon.awssdk.services.ssm.model.SendCommandRequest;
-
+import software.amazon.awssdk.services.ssm.model.GetCommandInvocationRequest;
+import software.amazon.awssdk.services.ssm.model.GetCommandInvocationResponse;
+import software.amazon.awssdk.services.ssm.model.InvocationDoesNotExistException;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -80,7 +82,43 @@ public class RunService {
 
         return toView(run);
     }
+    @Transactional(readOnly = true)
+    public String getConsole(Long runId) {
+        Run run = runs.findById(runId).orElseThrow();
 
+        if (run.getCommandId() == null || run.getInstanceId() == null) {
+            return "No command/instance available for this run yet.";
+        }
+
+        try {
+            GetCommandInvocationResponse resp = ssm.getCommandInvocation(
+                    GetCommandInvocationRequest.builder()
+                            .commandId(run.getCommandId())
+                            .instanceId(run.getInstanceId())
+                            .build()
+            );
+
+            String status = resp.status() == null ? "UNKNOWN" : resp.status().toString();
+            String out = Optional.ofNullable(resp.standardOutputContent()).orElse("");
+            String err = Optional.ofNullable(resp.standardErrorContent()).orElse("");
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("[status] ").append(status).append('\n');
+            if (!out.isEmpty()) {
+                sb.append("--- stdout ---\n").append(out.trim()).append('\n');
+            }
+            if (!err.isEmpty()) {
+                sb.append("--- stderr ---\n").append(err.trim()).append('\n');
+            }
+            return sb.toString().isBlank() ? "[status] " + status + "\n(no output yet)" : sb.toString();
+
+        } catch (InvocationDoesNotExistException e) {
+            // Command hasn’t started or SSM hasn’t picked it up yet
+            return "Invocation not available yet. Try again in a few seconds.";
+        } catch (Exception e) {
+            return "Failed to fetch console output: " + e.getMessage();
+        }
+    }
     @Transactional
     public RunStatusView pollAndUpdate(Long runId) {
         Run run = runs.findById(runId).orElseThrow();
@@ -204,116 +242,130 @@ public class RunService {
 
     private String ubuntuUserData() {
         return """
-            #!/bin/bash
-            set -eux
-            apt-get update -y
-            apt-get install -y snapd python3 python3-pip
-            snap install amazon-ssm-agent --classic || true
-            systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
-            systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+        #!/bin/bash
+        set -eux
+        apt-get update -y
+        apt-get install -y snapd python3 python3-pip
+        snap install amazon-ssm-agent --classic || true
+        systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+        systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
-            # Install safe baseline dependencies
-            pip3 install boto3 scikit-learn matplotlib pandas numpy pyyaml
+        # Install safe baseline dependencies
+        pip3 install boto3 scikit-learn matplotlib pandas numpy pyyaml pillow
 
-            mkdir -p /opt/automesh
-            cat > /opt/automesh/runner.py <<'PYEOF'
-            #!/usr/bin/env python3
-            import os, sys, subprocess, json, boto3, traceback
+        mkdir -p /opt/automesh
+        cat > /opt/automesh/runner.py <<'PYEOF'
+        #!/usr/bin/env python3
+        import os, sys, subprocess, json, boto3, traceback
 
-            def parse_s3(uri):
-                uri = uri.replace("s3://", "")
-                bucket, key = uri.split("/", 1)
-                return bucket, key
+        def parse_s3(uri):
+            uri = uri.replace("s3://", "")
+            bucket, key = uri.split("/", 1)
+            return bucket, key
 
-            def upload_file(s3, local, bucket, key):
-                if os.path.exists(local):
-                    s3.upload_file(local, bucket, key)
+        def upload_file(s3, local, bucket, key):
+            if os.path.exists(local):
+                s3.upload_file(local, bucket, key)
 
-            def main():
-                if len(sys.argv) < 9:
-                    print("Usage: runner.py --base_s3 <s3://...> --out_s3 <s3://...> --task <task> --run_id <id>")
-                    sys.exit(1)
+        def main():
+            if len(sys.argv) < 9:
+                print("Usage: runner.py --base_s3 <s3://...> --out_s3 <s3://...> --task <task> --run_id <id>")
+                sys.exit(1)
 
-                args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-                base_s3 = args.get("--base_s3")
-                out_s3  = args.get("--out_s3")
-                task    = args.get("--task")
-                run_id  = args.get("--run_id")
+            args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+            base_s3 = args.get("--base_s3")
+            out_s3  = args.get("--out_s3")
+            task    = args.get("--task")
+            run_id  = args.get("--run_id")
 
-                bucket, base_prefix = parse_s3(base_s3)
-                _, out_prefix = parse_s3(out_s3)
-                workdir = f"/tmp/run_{run_id}"
-                os.makedirs(workdir, exist_ok=True)
+            bucket, base_prefix = parse_s3(base_s3)
+            _, out_prefix = parse_s3(out_s3)
+            workdir = f"/tmp/run_{run_id}"
+            os.makedirs(workdir, exist_ok=True)
 
-                s3 = boto3.client("s3")
+            s3 = boto3.client("s3")
 
-                # 1. Download available project files
-                files = ["driver.py","tests.yaml","dataset.csv","train.py","predict.py","requirements.txt"]
-                for f in files:
-                    try:
-                        s3.download_file(bucket, f"{base_prefix}/{f}", os.path.join(workdir,f))
-                        print(f"Downloaded {f}")
-                    except Exception:
-                        pass
-
-                # 2. Install dependencies
-                reqs = os.path.join(workdir, "requirements.txt")
-                if os.path.exists(reqs):
-                    print("Installing project requirements...")
-                    subprocess.run([sys.executable,"-m","pip","install","-r",reqs],check=False)
-                else:
-                    print("No requirements.txt found, using baseline packages already installed.")
-
-                # 3. Run driver.py (always generated by LLM)
-                driver = os.path.join(workdir,"driver.py")
-                log_path = os.path.join(workdir,"logs.txt")
+            # 1. Download available project files
+            files = ["driver.py","tests.yaml","dataset.csv","train.py","predict.py","requirements.txt"]
+            for f in files:
                 try:
-                    with open(log_path,"w") as logf:
-                        subprocess.run([sys.executable,driver,"--base_dir",workdir],
-                                       stdout=logf,stderr=logf,check=False)
+                    s3.download_file(bucket, f"{base_prefix}/{f}", os.path.join(workdir,f))
+                    print(f"Downloaded {f}")
                 except Exception:
-                    with open(log_path,"a") as logf:
-                        traceback.print_exc(file=logf)
+                    pass
 
-                # 4. Ensure metrics.json exists (parse from logs if not)
-                metrics_path = os.path.join(workdir,"metrics.json")
-                if not os.path.exists(metrics_path):
-                    metrics = {}
+            # 1b. Download all images under pre-processed/images/
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=f"{base_prefix}/images/"):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    rel_path = key.replace(base_prefix + "/", "")
+                    local_path = os.path.join(workdir, rel_path)
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
                     try:
-                        with open(log_path) as f:
-                            for line in f:
-                                for m in ["Accuracy","Precision","Recall","F1-score"]:
-                                    if line.strip().startswith(m):
-                                        try:
-                                            metrics[m.lower().replace("-score","")] = float(line.split(":")[1])
-                                        except:
-                                            pass
-                        if metrics:
-                            with open(metrics_path,"w") as f: json.dump(metrics,f)
-                    except:
-                        pass
+                        s3.download_file(bucket, key, local_path)
+                        print(f"Downloaded {key} -> {local_path}")
+                    except Exception as e:
+                        print(f"[skip] {key}: {e}")
 
-                # 5. Create tests.csv (basic check results)
-                tests_path = os.path.join(workdir,"tests.csv")
+            # 2. Install dependencies
+            reqs = os.path.join(workdir, "requirements.txt")
+            if os.path.exists(reqs):
+                print("Installing project requirements...")
+                subprocess.run([sys.executable,"-m","pip","install","-r",reqs],check=False)
+            else:
+                print("No requirements.txt found, using baseline packages already installed.")
+
+            # 3. Run driver.py
+            driver = os.path.join(workdir,"driver.py")
+            log_path = os.path.join(workdir,"logs.txt")
+            try:
+                with open(log_path,"w") as logf:
+                    subprocess.run([sys.executable,driver,"--base_dir",workdir],
+                                   stdout=logf,stderr=logf,check=False)
+            except Exception:
+                with open(log_path,"a") as logf:
+                    traceback.print_exc(file=logf)
+
+            # 4. Ensure metrics.json exists
+            metrics_path = os.path.join(workdir,"metrics.json")
+            if not os.path.exists(metrics_path):
+                metrics = {}
                 try:
-                    rows=["name,category,severity,result,value,threshold,metric"]
-                    if os.path.exists(metrics_path):
-                        with open(metrics_path) as f: metrics=json.load(f)
-                        for k,v in metrics.items():
-                            rows.append(f"{k},Quality,high,PASS,{v},0.0,{k}")
-                    with open(tests_path,"w") as f: f.write("\\n".join(rows))
+                    with open(log_path) as f:
+                        for line in f:
+                            for m in ["Accuracy","Precision","Recall","F1-score"]:
+                                if line.strip().startswith(m):
+                                    try:
+                                        metrics[m.lower().replace("-score","")] = float(line.split(":")[1])
+                                    except:
+                                        pass
+                    if metrics:
+                        with open(metrics_path,"w") as f: json.dump(metrics,f)
                 except:
                     pass
 
-                # 6. Upload artifacts back to S3
-                for f in ["metrics.json","tests.csv","confusion_matrix.png","logs.txt"]:
-                    upload_file(s3, os.path.join(workdir,f), bucket, f"{out_prefix}/{f}")
+            # 5. Create tests.csv
+            tests_path = os.path.join(workdir,"tests.csv")
+            try:
+                rows=["name,category,severity,result,value,threshold,metric"]
+                if os.path.exists(metrics_path):
+                    with open(metrics_path) as f: metrics=json.load(f)
+                    for k,v in metrics.items():
+                        rows.append(f"{k},Quality,high,PASS,{v},0.0,{k}")
+                with open(tests_path,"w") as f: f.write("\\n".join(rows))
+            except:
+                pass
 
-            if __name__=="__main__":
-                main()
-            PYEOF
-            chmod +x /opt/automesh/runner.py
-            """;
+            # 6. Upload artifacts
+            for f in ["metrics.json","tests.csv","confusion_matrix.png","logs.txt"]:
+                upload_file(s3, os.path.join(workdir,f), bucket, f"{out_prefix}/{f}")
+
+        if __name__=="__main__":
+            main()
+        PYEOF
+        chmod +x /opt/automesh/runner.py
+        """;
     }
 
     // ============ helpers ============

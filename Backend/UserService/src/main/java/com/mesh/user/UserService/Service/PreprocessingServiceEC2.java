@@ -6,21 +6,15 @@ import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.util.List;
-import java.util.stream.Collectors;
 
 @Service
 public class PreprocessingServiceEC2 {
 
-    @Value("${ec2.host}")
-    private String ec2Host;
+    @Value("${ec2.host}") private String ec2Host;
+    @Value("${ec2.user}") private String ec2User;
+    @Value("${aws.s3.bucket}") private String bucketName;
 
-    @Value("${ec2.user}")
-    private String ec2User;
-
-    @Value("${aws.s3.bucket}")
-    private String bucketName;
-
-    // Absolute path to PEM on Windows
+    // Absolute PEM path
     private static final String PEM_PATH = "C:/SSHKeys/MeshopsPre.pem";
 
     public String trigger(String username, String projectName, String folder, List<String> files) {
@@ -29,73 +23,99 @@ public class PreprocessingServiceEC2 {
 
         try {
             JSch jsch = new JSch();
+            jsch.addIdentity(PEM_PATH);
 
-            // Load PEM key
-            jsch.addIdentity("C:/SSHKeys/MeshopsPre.pem");
-
-
-            // Enable JSch debug to see auth issues
+            // debug logging
             JSch.setLogger(new com.jcraft.jsch.Logger() {
-                @Override
                 public boolean isEnabled(int level) { return true; }
-                @Override
                 public void log(int level, String message) { System.out.println("[JSch] " + message); }
             });
 
-            // Connect to EC2
             session = jsch.getSession(ec2User, ec2Host, 22);
             session.setConfig("StrictHostKeyChecking", "no");
-            session.connect(10000); // 10s timeout
+            session.connect(15000);
 
-            // Prepare file arguments
-            String fileArgs = (files == null || files.isEmpty())
-                    ? ""
-                    : files.stream().collect(Collectors.joining(","));
+            // --- build S3 prefix ---
+            StringBuilder prefix = new StringBuilder();
+            prefix.append(username).append("/").append(projectName).append("/");
 
-            // Construct S3 prefix
-            String s3Prefix = username + "/" + projectName + "/";
-            if (folder != null && !folder.isEmpty()) {
-                s3Prefix += folder + "/";
+            String safeFolder = (folder == null) ? "" : folder.trim();
+            if (!safeFolder.isEmpty()) {
+                safeFolder = safeFolder.replace("\\", "/");
+                int lastSlash = safeFolder.lastIndexOf('/');
+                String lastSeg = lastSlash >= 0 ? safeFolder.substring(lastSlash + 1) : safeFolder;
+                // if looks like a file (has extension), drop it
+                if (lastSeg.contains(".")) {
+                    safeFolder = (lastSlash >= 0) ? safeFolder.substring(0, lastSlash) : "";
+                }
+                if (!safeFolder.isEmpty()) {
+                    if (!safeFolder.endsWith("/")) safeFolder += "/";
+                    prefix.append(safeFolder);
+                }
             }
 
-            // Command to run preprocessing on EC2
-            String command = String.format(
-                    "python3 preproc.py %s %s %s",
-                    bucketName, s3Prefix, fileArgs
-            );
+            // --- build command ---
+            StringBuilder cmd = new StringBuilder();
+            cmd.append("python3 preproc.py ")
+                    .append(escape(bucketName)).append(" ")
+                    .append(escape(prefix.toString()));
 
-            // Execute command
+            // Optional files
+            if (files != null && !files.isEmpty()) {
+                cmd.append(" --files");
+                for (String f : files) {
+                    if (f == null || f.trim().isEmpty()) continue;
+                    String ff = f.trim().replace("\\", "/");
+                    // Strip folder prefix if duplicate
+                    if (!safeFolder.isEmpty() && ff.startsWith(safeFolder)) {
+                        ff = ff.substring(safeFolder.length()).replaceFirst("^/", "");
+                    }
+                    cmd.append(" ").append(escape(ff));
+                }
+            }
+
+            String command = cmd.toString();
+            System.out.println("[EC2 CMD] " + command);
+
+            // --- exec remote command ---
             channel = (ChannelExec) session.openChannel("exec");
             channel.setCommand(command);
 
-            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-            ByteArrayOutputStream errorStream = new ByteArrayOutputStream();
-            channel.setOutputStream(outputStream);
-            channel.setErrStream(errorStream);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            ByteArrayOutputStream err = new ByteArrayOutputStream();
+            channel.setOutputStream(out);
+            channel.setErrStream(err);
 
             channel.connect();
 
-            while (!channel.isClosed()) {
-                Thread.sleep(200);
+            while (!channel.isClosed()) Thread.sleep(150);
+
+            String stdout = out.toString().trim();
+            String stderr = err.toString().trim();
+
+            if (!stderr.isEmpty() && stdout.isEmpty()) {
+                return "{\"status\":\"error\",\"message\":\"" + stderr.replace("\"", "\\\"") + "\"}";
             }
-
-            String stdout = outputStream.toString().trim();
-            String stderr = errorStream.toString().trim();
-
-            if (!stderr.isEmpty()) {
-                return "{\"status\":\"error\", \"message\":\"" + stderr.replace("\"", "\\\"") + "\"}";
+            if (!stderr.isEmpty() && !stdout.isEmpty()) {
+                return "{\"status\":\"warn\",\"stdout\":\"" + stdout.replace("\"", "\\\"")
+                        + "\",\"stderr\":\"" + stderr.replace("\"", "\\\"") + "\"}";
             }
-
-            return stdout;
+            return stdout.isEmpty()
+                    ? "{\"status\":\"ok\",\"message\":\"completed\"}"
+                    : stdout;
 
         } catch (JSchException e) {
-            // Capture auth failures
-            return "{\"status\":\"auth_fail\", \"message\":\"" + e.getMessage().replace("\"", "\\\"") + "\"}";
+            return "{\"status\":\"auth_fail\",\"message\":\"" + e.getMessage().replace("\"", "\\\"") + "\"}";
         } catch (Exception e) {
-            return "{\"status\":\"error\", \"message\":\"" + e.getMessage().replace("\"", "\\\"") + "\"}";
+            return "{\"status\":\"error\",\"message\":\"" + e.getMessage().replace("\"", "\\\"") + "\"}";
         } finally {
             if (channel != null && !channel.isClosed()) channel.disconnect();
             if (session != null && session.isConnected()) session.disconnect();
         }
+    }
+
+    private static String escape(String s) {
+        if (s == null) return "''";
+        return "'" + s.replace("'", "'\\''") + "'";
     }
 }
