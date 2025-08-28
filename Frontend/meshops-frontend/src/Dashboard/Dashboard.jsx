@@ -16,7 +16,7 @@ const Dashboard = () => {
   return (
     <div className="min-h-screen bg-[#000000] flex">
       <SidePanel />
-      <main className="flex-1 bg-[#0A0A29] border-l border-[#2A2A4A]">
+      <main className="flex-1 bg-[#1c2e3c] border-l border-[#1c2e3c]">
         <Routes>
           <Route path="/" element={<Navigate to="storage" replace />} />
           <Route path="storage" element={<StorageView />} />

@@ -1,24 +1,34 @@
 // src/pages/BehaviourTest.jsx
-// Behaviour Testing – review/edit before approve, per-run testcase generation & versioning
-
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import Editor from "@monaco-editor/react";
 import {
   ensureProject,
   generatePlan,
   approvePlan,
   startRun,
   getRunStatus,
-  pollRun,
   listArtifacts,
-  generateTestsNow,
 } from "../api/behaviour";
 import { StorageAPI } from "../api/storage";
+import {
+  PieChart,
+  Pie,
+  Cell,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
 
-/* ---------- atoms ---------- */
+/* ---------- atoms (lean) ---------- */
 const Btn = ({ className = "", variant = "default", ...p }) => {
   const variants = {
     default: "border-white/15 hover:bg-white/10",
-    primary: "border-transparent bg-[#2D6BFF] hover:bg-[#275FE3]",
+    primary:
+      "border-transparent bg-gradient-to-b from-[#D4AF37]/80 to-[#B69121]/80 hover:from-[#D4AF37] hover:to-[#B69121] text-black font-medium shadow-lg shadow-yellow-800/20",
     ghost: "border-transparent hover:bg-white/5",
     danger: "border-rose-500/40 hover:bg-rose-500/10",
   };
@@ -34,6 +44,15 @@ const Btn = ({ className = "", variant = "default", ...p }) => {
     />
   );
 };
+const Card = ({ title, children }) => (
+  <div
+    className="rounded-2xl border p-4 space-y-3"
+    style={{ borderColor: "rgba(255,255,255,0.09)", background: "#0F0F1A" }}
+  >
+    <div className="font-semibold text-white/80 mb-2">{title}</div>
+    {children}
+  </div>
+);
 const Input = (props) => (
   <input
     {...props}
@@ -43,37 +62,6 @@ const Input = (props) => (
     }
   />
 );
-const TextArea = (props) => (
-  <textarea
-    {...props}
-    className={
-      (props.className || "") +
-      " bg-[#121235] border border-white/10 rounded p-2 text-sm text-white font-mono placeholder-white/40"
-    }
-  />
-);
-const Card = ({ title, action, children }) => (
-  <div className="rounded-2xl border border-white/10 bg-[#0B0B2A]">
-    <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-      <div className="text-white/80 font-semibold">{title}</div>
-      {action}
-    </div>
-    <div className="p-4">{children}</div>
-  </div>
-);
-const Badge = ({ tone = "muted", children }) => {
-  const cls = {
-    green: "bg-emerald-400/10 border-emerald-400/30 text-emerald-300",
-    red: "bg-rose-400/10 border-rose-400/30 text-rose-300",
-    blue: "bg-sky-400/10 border-sky-400/30 text-sky-300",
-    muted: "bg-white/5 border-white/15 text-white/70",
-  }[tone];
-  return (
-    <span className={"px-2 py-0.5 rounded text-[11px] border " + cls}>
-      {children}
-    </span>
-  );
-};
 const Step = ({ idx, label, state }) => {
   const color =
     state === "done"
@@ -87,7 +75,7 @@ const Step = ({ idx, label, state }) => {
     <div className="flex items-center gap-3">
       <div
         className={
-          "w-6 h-6 rounded-full flex items-center justify-center text-[11px] " +
+          "w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold " +
           color
         }
       >
@@ -100,6 +88,7 @@ const Step = ({ idx, label, state }) => {
 
 /* ---------- utils ---------- */
 const BASE_STORAGE = "http://localhost:8081";
+const BASE_RUNS = "http://localhost:8082/api/runs";
 
 function normalizeKey(key) {
   if (!key) return "";
@@ -108,81 +97,6 @@ function normalizeKey(key) {
   if (key.startsWith("/")) return key.slice(1);
   return key;
 }
-
-function parseCSV(text) {
-  const rows = [];
-  let row = [],
-    field = "",
-    q = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i],
-      n = text[i + 1];
-    if (q) {
-      if (c === '"' && n === '"') {
-        field += '"';
-        i++;
-      } else if (c === '"') {
-        q = false;
-      } else {
-        field += c;
-      }
-    } else {
-      if (c === '"') q = true;
-      else if (c === ",") {
-        row.push(field);
-        field = "";
-      } else if (c === "\r") {
-      } else if (c === "\n") {
-        row.push(field);
-        rows.push(row);
-        row = [];
-        field = "";
-      } else field += c;
-    }
-  }
-  if (field !== "" || q || row.length) {
-    row.push(field);
-    rows.push(row);
-  }
-  if (!rows.length) return { headers: [], rows: [] };
-  const headers = rows[0];
-  const data = rows
-    .slice(1)
-    .filter((r) => r.length && !(r.length === 1 && r[0] === ""));
-  return { headers, rows: data };
-}
-
-function splitKeyForStorage(username, projectName, s3Key) {
-  const prefix = `${username}/${projectName}/`;
-  if (!s3Key || !s3Key.startsWith(prefix)) return null;
-  const rel = s3Key.slice(prefix.length);
-  const parts = rel.split("/").filter(Boolean);
-  if (!parts.length) return null;
-  const fileName = parts.pop();
-  const folder = parts.join("/");
-  return { folder, fileName };
-}
-
-async function fetchTextWithFallback(artifact, username, projectName) {
-  try {
-    const r = await fetch(artifact.url, { method: "GET" });
-    return await r.text();
-  } catch {
-    const split = splitKeyForStorage(username, projectName, artifact.s3Key);
-    if (!split) throw new Error("No s3Key split");
-    const url = `${BASE_STORAGE}/api/user-storage/${encodeURIComponent(
-      username
-    )}/projects/${encodeURIComponent(
-      projectName
-    )}/download/${encodeURIComponent(split.fileName)}?folder=${encodeURIComponent(
-      split.folder
-    )}`;
-    const r2 = await fetch(url, { method: "GET" });
-    if (!r2.ok) throw new Error(`Storage fallback ${r2.status}`);
-    return await r2.text();
-  }
-}
-
 function splitKey(key) {
   const cleaned = normalizeKey(key);
   const parts = (cleaned || "").split("/").filter(Boolean);
@@ -194,13 +108,7 @@ async function downloadS3Text(username, projectName, key) {
   const { folder, fileName } = splitKey(key);
   return await StorageAPI.fetchTextFile(username, projectName, fileName, folder);
 }
-async function uploadS3Text(
-  username,
-  projectName,
-  key,
-  content,
-  contentType = "text/plain"
-) {
+async function uploadS3Text(username, projectName, key, content, contentType) {
   const { folder, fileName } = splitKey(key);
   return await StorageAPI.uploadTextFile(
     username,
@@ -208,70 +116,59 @@ async function uploadS3Text(
     fileName,
     content,
     folder,
-    contentType
+    contentType || "text/plain"
   );
 }
+function parseCSV(text) {
+  const rows = text.split(/\r?\n/).map((r) => r.split(","));
+  if (!rows.length) return { headers: [], rows: [] };
+  return { headers: rows[0], rows: rows.slice(1).filter((r) => r.join("").trim()) };
+}
+const s3DownloadUrl = (username, projectName, folder, fileName) =>
+  `${BASE_STORAGE}/api/user-storage/${encodeURIComponent(
+    username
+  )}/projects/${encodeURIComponent(
+    projectName
+  )}/download/${encodeURIComponent(fileName)}?folder=${encodeURIComponent(folder)}`;
 
 /* ---------- main ---------- */
 export default function BehaviourTest() {
-  const username =
-    localStorage.getItem("username") ||
-    localStorage.getItem("email") ||
-    "pg";
-
+  const username = localStorage.getItem("username") || "pg";
   const [projects, setProjects] = useState([]);
   const [projectName, setProjectName] = useState(
     localStorage.getItem("activeProject") || ""
   );
-  const [s3Prefix, setS3Prefix] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [brief, setBrief] = useState(
-    "Create behaviour tests for my classification model."
-  );
-  const [filesText, setFilesText] = useState(
-    "train.py\npredict.py\ndata/dataset.csv"
-  );
-  const filesArray = useMemo(
-    () => filesText.split(/\r?\n/).map((v) => v.trim()).filter(Boolean),
-    [filesText]
-  );
-  const [driverKey, setDriverKey] = useState("");
-  const [testsKey, setTestsKey] = useState("");
-  const [approved, setApproved] = useState(true);
 
+  // states
+  const [runId, setRunId] = useState(null);
+  const [consoleLines, setConsoleLines] = useState([]);
+  const [files, setFiles] = useState([]); // [{name, content, language}]
+  const [activeFile, setActiveFile] = useState(null);
+  const [metrics, setMetrics] = useState(null);
+  const [confusionURL, setConfusionURL] = useState("");
+  const [csvInfo, setCsvInfo] = useState({ headers: [], rows: [] });
+  const [csvSearch, setCsvSearch] = useState("");
+  const [csvPage, setCsvPage] = useState(1);
+  const [busy, setBusy] = useState(false);
+
+  // previous runs
+  const [runs, setRuns] = useState([]); // [{runId}]
+  const [selectedRunId, setSelectedRunId] = useState(null);
+  const [trend, setTrend] = useState([]); // [{runId, acc}]
+
+  // step states
   const [stepState, setStepState] = useState({
     ensure: "idle",
     plan: "idle",
     approve: "idle",
     start: "idle",
   });
-  const [ctaBusy, setCtaBusy] = useState(false);
-  const [runId, setRunId] = useState(null);
-  const [status, setStatus] = useState(null);
-  const [artifacts, setArtifacts] = useState([]);
-  const pollTimer = useRef(null);
-  const [metrics, setMetrics] = useState(null);
-  const [confusionURL, setConfusionURL] = useState("");
-  const [csvInfo, setCsvInfo] = useState({ headers: [], rows: [] });
-  const [csvSearch, setCsvSearch] = useState("");
-  const [csvPage, setCsvPage] = useState(1);
-  const [recentRuns, setRecentRuns] = useState([]);
-  const [selectedRunId, setSelectedRunId] = useState(null);
-  const runsRefreshTimer = useRef(null);
-  const [log, setLog] = useState("");
-  const logLine = (s) => setLog((prev) => (prev ? prev + "\n" : "") + s);
-  const [showApprovePanel, setShowApprovePanel] = useState(false);
-  const [driverText, setDriverText] = useState("");
-  const [testsText, setTestsText] = useState("");
-  const [saveBusy, setSaveBusy] = useState(false);
-  const [genBusy, setGenBusy] = useState(false);
 
+  /* ---------- load projects ---------- */
   useEffect(() => {
     (async () => {
       try {
-        const url = `${BASE_STORAGE}/api/user-storage/${encodeURIComponent(
-          username
-        )}/projects`;
+        const url = `${BASE_STORAGE}/api/user-storage/${username}/projects`;
         const res = await fetch(url);
         const list = (await res.json()) || [];
         setProjects(list);
@@ -283,955 +180,528 @@ export default function BehaviourTest() {
     })();
   }, [username]);
 
-  useEffect(() => {
-    const auto = `s3://my-users-meshops-bucket/${username}/${
-      projectName || "project"
-    }/pre-processed`;
-    setS3Prefix(auto);
-  }, [projectName, username]);
-
-  const refreshRunsFromStorage = async () => {
+  /* ---------- refresh previous runs from S3 (+ tiny metrics trend) ---------- */
+  const refreshRuns = async () => {
     if (!projectName) return;
     try {
-      const items = await StorageAPI.listFiles(
-        username,
-        projectName,
-        "artifacts-behaviour"
+      const items = await StorageAPI.listFiles(username, projectName, "artifacts-behaviour");
+      const parsed =
+        (items || [])
+          .map((n) => String(n).trim())
+          .map((n) => {
+            const m = /^run_(\d+)\/?$/.exec(n);
+            return m ? { runId: Number(m[1]) } : null;
+          })
+          .filter(Boolean)
+          .sort((a, b) => b.runId - a.runId);
+
+      setRuns(parsed);
+      if (!selectedRunId && parsed.length) setSelectedRunId(parsed[0].runId);
+
+      // mini trend: try read accuracy from each run's metrics.json (best-effort)
+      const take = parsed.slice(0, 12); // recent 12
+      const results = [];
+      for (const r of take) {
+        try {
+          const txt = await StorageAPI.fetchTextFile(
+            username,
+            projectName,
+            "metrics.json",
+            `artifacts-behaviour/run_${r.runId}`
+          );
+          const mj = JSON.parse(txt || "{}");
+          const acc =
+            mj.accuracy ?? mj.acc ?? mj["accuracy_score"] ?? mj["Accuracy"] ?? null;
+          results.push({ runId: r.runId, acc: typeof acc === "number" ? acc : null });
+        } catch {
+          results.push({ runId: r.runId, acc: null });
+        }
+      }
+      setTrend(results.reverse()); // oldest → newest for nicer sparkline
+    } catch {}
+  };
+  useEffect(() => {
+    refreshRuns();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectName]);
+
+  /* ---------- realtime console ---------- */
+  useEffect(() => {
+    if (!runId) return;
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`${BASE_RUNS}/${runId}/console`);
+        if (res.ok) {
+          const txt = await res.text();
+          setConsoleLines(txt.split("\n"));
+        }
+      } catch {}
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [runId]);
+
+  /* ---------- run behaviour tests ---------- */
+const runAll = async () => {
+  if (!projectName) return;
+  setBusy(true);
+
+  try {
+    // Step 1: Ensure project
+    setStepState({ ensure: "doing", plan: "idle", approve: "idle", start: "idle" });
+    await ensureProject({ username, projectName });
+    setStepState((s) => ({ ...s, ensure: "done", plan: "doing" }));
+
+    // Step 2: List files in pre-processed/
+    let items = [];
+    try {
+      items = await StorageAPI.listFiles(username, projectName, "pre-processed");
+    } catch (e) {
+      console.warn("Could not list pre-processed files", e);
+    }
+
+    // Step 3: Detect driver/tests
+    const hasDriver = items?.some((f) => f.toLowerCase().includes("driver.py"));
+    const hasTests = items?.some((f) => f.toLowerCase().includes("tests.yaml"));
+
+    if (!hasDriver || !hasTests) {
+      console.log("Missing driver.py or tests.yaml → calling generatePlan()");
+      await generatePlan(username, projectName, {
+        brief: "Create behaviour tests for my model",
+        files: ["train.py", "predict.py", "data/dataset.csv"], // fallback defaults
+      });
+    }
+
+    setStepState((s) => ({ ...s, plan: "done", approve: "doing" }));
+
+    // Step 4: Load actual files into editor
+    const loaded = await Promise.all(
+      (items || []).map(async (f) => {
+        const txt = await StorageAPI.fetchTextFile(username, projectName, f, "pre-processed");
+        let language = f.endsWith(".py")
+          ? "python"
+          : f.endsWith(".yaml") || f.endsWith(".yml")
+          ? "yaml"
+          : f.endsWith(".json")
+          ? "json"
+          : f.endsWith(".js")
+          ? "javascript"
+          : f.endsWith(".ts")
+          ? "typescript"
+          : "plaintext";
+        return { name: f, content: txt, language };
+      })
+    );
+
+    setFiles(loaded);
+    if (loaded.length) setActiveFile(loaded[0].name);
+
+  } catch (e) {
+    console.error("Error during runAll:", e);
+    setStepState((s) => ({ ...s, plan: "fail" }));
+  } finally {
+    setBusy(false);
+  }
+};
+
+
+// inside approveAndRun
+const approveAndRun = async () => {
+  if (!projectName || !projectName.trim()) {
+    alert("Please select a valid project before approving plan.");
+    return;
+  }
+  console.log("➡️ Approving & starting run with", { username, projectName });
+  setBusy(true);
+  try {
+    await Promise.all(
+      files.map((f) =>
+        uploadS3Text(username, projectName, `pre-processed/${f.name}`, f.content, "text/plain")
+      )
+    );
+    await approvePlan({ username, projectName, approved: true });
+    const r = await startRun({ username, projectName, task: "classification" });
+    console.log("✅ startRun response:", r?.data);
+    setRunId(r?.data?.runId);
+    setStepState((s) => ({ ...s, approve: "done", start: "doing" }));
+  } catch (e) {
+    console.error("❌ approveAndRun failed:", e);
+    alert("Error during approveAndRun: " + (e.response?.data?.message || e.message));
+    setStepState((s) => ({ ...s, start: "fail" }));
+  } finally {
+    setBusy(false);
+  }
+};
+
+
+  /* ---------- watch artifacts (end of run) ---------- */
+  useEffect(() => {
+    if (!runId) return;
+    const timer = setInterval(async () => {
+      try {
+        const res = await getRunStatus(runId);
+        if (res.data?.isDone) {
+          clearInterval(timer);
+          setStepState((s) => ({ ...s, start: "done" }));
+          const arts = await listArtifacts(runId);
+          const arr = arts.data || [];
+          const metricsArt = arr.find((a) => (a.name || "").includes("metrics"));
+          const confArt = arr.find((a) => (a.name || "").includes("confusion"));
+          const csvArt = arr.find((a) => (a.name || "").endsWith(".csv"));
+          if (metricsArt) {
+            const t = await fetch(metricsArt.url).then((r) => r.text());
+            try {
+              setMetrics(JSON.parse(t));
+            } catch {}
+          }
+          if (confArt) setConfusionURL(confArt.url);
+          if (csvArt) {
+            const t = await fetch(csvArt.url).then((r) => r.text());
+            setCsvInfo(parseCSV(t));
+          }
+          // refresh history a bit later so run_NN appears
+          setTimeout(refreshRuns, 800);
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId]);
+
+  /* ---------- select previous run from S3 → load artifacts ---------- */
+  const loadRunFromHistory = async (rid) => {
+    setSelectedRunId(rid);
+
+    try {
+      // metrics
+      try {
+        const txt = await StorageAPI.fetchTextFile(
+          username,
+          projectName,
+          "metrics.json",
+          `artifacts-behaviour/run_${rid}`
+        );
+        setMetrics(JSON.parse(txt));
+      } catch (e) {
+        console.warn(`metrics.json not found for run_${rid}`, e);
+        setMetrics(null);
+      }
+
+      // confusion
+      setConfusionURL(
+        s3DownloadUrl(username, projectName, `artifacts-behaviour/run_${rid}`, "confusion_matrix.png")
       );
-      const runs = items
-        .map((n) => {
-          const m = /^run_(\d+)\/?$/.exec(String(n).trim());
-          return m ? { runId: Number(m[1]) } : null;
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.runId - a.runId);
-      setRecentRuns(runs);
-      if (!selectedRunId && runs.length) setSelectedRunId(runs[0].runId);
+
+      // csv
+      try {
+        const csvText = await StorageAPI.fetchTextFile(
+          username,
+          projectName,
+          "tests.csv",
+          `artifacts-behaviour/run_${rid}`
+        );
+        setCsvInfo(parseCSV(csvText));
+        setCsvPage(1);
+      } catch {
+        setCsvInfo({ headers: [], rows: [] });
+      }
     } catch {}
   };
 
   useEffect(() => {
-    clearInterval(runsRefreshTimer.current || undefined);
-    if (!projectName) return;
-    refreshRunsFromStorage();
-    runsRefreshTimer.current = setInterval(refreshRunsFromStorage, 10000);
-    return () => clearInterval(runsRefreshTimer.current || undefined);
-  }, [projectName]);
+    if (selectedRunId) loadRunFromHistory(selectedRunId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRunId]);
 
-  const CANON_DRIVER = "pre-processed/driver.py";
-  const CANON_TESTS = "pre-processed/tests.yaml";
-
-  const runAll = async () => {
-    if (!projectName) {
-      logLine("Pick or create a project in Storage first.");
-      return;
-    }
-
-    setCtaBusy(true);
-    setArtifacts([]);
-    setMetrics(null);
-    setConfusionURL("");
-    setCsvInfo({ headers: [], rows: [] });
-    setSelectedRunId(null);
-    setStepState({
-      ensure: "doing",
-      plan: "idle",
-      approve: "idle",
-      start: "idle",
-    });
-
-    try {
-      await ensureProject({ username, projectName, s3Prefix });
-      setStepState((s) => ({ ...s, ensure: "done", plan: "doing" }));
-
-      let hasDriver = false,
-        hasTests = false;
-      try {
-        const items = await StorageAPI.listFiles(
-          username,
-          projectName,
-          "pre-processed"
-        );
-        const names = (items || []).map((n) => String(n).replace(/\/$/, ""));
-        hasDriver = names.includes("driver.py");
-        hasTests = names.includes("tests.yaml");
-        logLine(`S3 check: driver=${hasDriver}, tests=${hasTests}`);
-      } catch {
-        logLine("Could not list pre-processed; assuming missing.");
-      }
-
-      if (hasDriver || hasTests) {
-        if (hasDriver) {
-          try {
-            const dt = await downloadS3Text(username, projectName, CANON_DRIVER);
-            setDriverText(dt);
-            setDriverKey(CANON_DRIVER);
-          } catch {}
-        } else setDriverKey(CANON_DRIVER);
-
-        if (hasTests) {
-          try {
-            const tt = await downloadS3Text(username, projectName, CANON_TESTS);
-            setTestsText(tt);
-            setTestsKey(CANON_TESTS);
-          } catch {}
-        } else setTestsKey(CANON_TESTS);
-
-        setStepState((s) => ({ ...s, plan: "done", approve: "doing" }));
-        setShowApprovePanel(true);
-        setCtaBusy(false);
-        return;
-      }
-
-      logLine("⚠️ No driver/tests found → generating via LLM…");
-      const gen = await generatePlan(username, projectName, {
-        brief,
-        files: filesArray,
-      });
-      const m = (gen && gen.data) || {};
-      const guessDriver = normalizeKey(m.driverKey || CANON_DRIVER);
-      const guessTests = normalizeKey(m.testsKey || CANON_TESTS);
-
-      setDriverKey(guessDriver);
-      setTestsKey(guessTests);
-      let dt = m.driverContent || "";
-      if (!dt) {
-        try {
-          dt = await downloadS3Text(username, projectName, guessDriver);
-        } catch {}
-      }
-      let tt = m.testsContent || "";
-      if (!tt) {
-        try {
-          tt = await downloadS3Text(username, projectName, guessTests);
-        } catch {}
-      }
-
-      setDriverText(dt);
-      setTestsText(tt);
-      setStepState((s) => ({ ...s, plan: "done", approve: "doing" }));
-      setShowApprovePanel(true);
-      setCtaBusy(false);
-    } catch (err) {
-      logLine("❌ Error: " + (err?.response?.data || err.message));
-      setStepState((s) => ({ ...s, plan: "fail" }));
-      setCtaBusy(false);
-    }
-  };
-
-  const generateNewTests = async () => {
-    if (!projectName) {
-      logLine("Pick or create a project in Storage first.");
-      return;
-    }
-    setGenBusy(true);
-    try {
-      const res = await generateTestsNow(username, projectName, {
-        brief,
-        files: filesArray,
-        s3Prefix,
-      });
-      const data = (res && res.data) || {};
-      const key = normalizeKey(
-        data.versionKey || data.key || data.testsKey || ""
-      );
-      if (key) {
-        setTestsKey(key);
-        try {
-          const txt = await downloadS3Text(username, projectName, key);
-          setTestsText(txt);
-          logLine(`Generated tests at: ${key}`);
-        } catch (e) {
-          logLine(
-            `Generated tests key set but download failed: ${e.message}`
-          );
-        }
-      }
-    } catch (e) {
-      logLine("Generate tests failed: " + (e?.response?.data || e.message));
-    } finally {
-      setGenBusy(false);
-    }
-  };
-
-  // ✅ Approve and run
-  const approveAndRun = async () => {
-  if (!projectName) {
-    logLine("Pick or create a project in Storage first.");
-    return;
-  }
-  setSaveBusy(true);
-  try {
-    // upload current driver.py and tests.yaml to S3
-    await uploadS3Text(
-      username,
-      projectName,
-      `pre-processed/driver.py`,
-      driverText,
-      "text/x-python"
-    );
-    await uploadS3Text(
-      username,
-      projectName,
-      `pre-processed/tests.yaml`,
-      testsText,
-      "text/yaml"
-    );
-
-    // ✅ FIX: prepend username/projectName when sending approvePlan
-    await approvePlan({
-      username,
-      projectName,
-      driverKey: `${username}/${projectName}/pre-processed/driver.py`,
-      testsKey: `${username}/${projectName}/pre-processed/tests.yaml`,
-      s3Prefix: `s3://my-users-meshops-bucket/${username}/${projectName}/pre-processed`,
-      approved: true,
-    });
-
-    // start run
-    const r = await startRun({ username, projectName, task: "classification" });
-    const newRunId = r?.data?.runId;
-    setRunId(newRunId);
-    setStatus(null);
-    setStepState((s) => ({ ...s, approve: "done", start: "doing" }));
-    setShowApprovePanel(false);
-    logLine(`✅ Run started with id ${newRunId}`);
-
-    kickPolling(newRunId);
-  } catch (e) {
-    logLine("❌ Approve & Run failed: " + (e?.response?.data || e.message));
-    setStepState((s) => ({ ...s, start: "fail" }));
-  } finally {
-    setSaveBusy(false);
-  }
-};
-
-  const kickPolling = (id) => {
-    clearPolling();
-    if (!id) return;
-    pollTimer.current = setInterval(async () => {
-      try {
-        const r = await getRunStatus(id);
-        const st = r.data;
-        setStatus(st);
-        if (st?.isDone) {
-          clearPolling();
-          const arts = await listArtifacts(id);
-          setArtifacts(arts.data || []);
-          refreshRunsFromStorage();
-        }
-      } catch {
-        try {
-          const r2 = await pollRun(id);
-          const st2 = r2.data;
-          setStatus(st2);
-          if (st2?.isDone) {
-            clearPolling();
-            const arts2 = await listArtifacts(id);
-            setArtifacts(arts2.data || []);
-            refreshRunsFromStorage();
-          }
-        } catch (e2) {
-          clearPolling();
-          logLine("Polling failed: " + (e2?.response?.data || e2.message));
-        }
-      }
-    }, 2500);
-  };
-  const clearPolling = () => {
-    if (pollTimer.current) clearInterval(pollTimer.current);
-    pollTimer.current = null;
-  };
-  useEffect(() => clearPolling, []);
-
-  const loadRunFromHistory = async (rid) => {
-    setSelectedRunId(rid);
-    setRunId(rid);
-    setStatus(null);
-    setArtifacts([]);
-    setMetrics(null);
-    setCsvInfo({ headers: [], rows: [] });
-    setConfusionURL("");
-    try {
-      const arts = await listArtifacts(rid);
-      setArtifacts(arts.data || []);
-    } catch {
-      logLine("Failed to load artifacts for run #" + rid);
-    }
-  };
-
-  useEffect(() => {
-    if (!artifacts?.length) {
-      setMetrics(null);
-      setCsvInfo({ headers: [], rows: [] });
-      setConfusionURL("");
-      return;
-    }
-    (async () => {
-      try {
-        const low = (s) => (s || "").toLowerCase();
-        const isImg = (a) => low(a.mime || "").startsWith("image/");
-        const isJson =
-          (a) =>
-            low(a.mime || "").includes("json") ||
-            (a.name || a.s3Key || "").toLowerCase().endsWith(".json");
-        const isCsv =
-          (a) =>
-            low(a.mime || "").includes("csv") ||
-            (a.name || a.s3Key || "").toLowerCase().endsWith(".csv");
-        const isTxt =
-          (a) =>
-            low(a.mime || "").startsWith("text/") ||
-            (a.name || a.s3Key || "").toLowerCase().endsWith(".txt");
-
-        const metricsArt = artifacts.find(
-          (a) =>
-            (low(a.name).includes("metrics") ||
-              low(a.s3Key).includes("metrics")) &&
-            isJson(a)
-        );
-
-        const confArt = artifacts.find(
-          (a) =>
-            (low(a.name).includes("confusion") ||
-              low(a.s3Key).includes("confusion")) &&
-            isImg(a)
-        );
-
-        const csvArt =
-          artifacts.find(
-            (a) =>
-              (/(test|result)/.test(low(a.name)) ||
-                /(test|result)/.test(low(a.s3Key))) &&
-              isCsv(a)
-          ) || artifacts.find(isCsv);
-
-        const logsArt = artifacts.find(
-          (a) =>
-            (/(log|logs)/.test(low(a.name)) ||
-              /(log|logs)/.test(low(a.s3Key))) &&
-            (isTxt(a) || isCsv(a) || isJson(a))
-        );
-
-        if (metricsArt) {
-          try {
-            const t = await fetchTextWithFallback(
-              metricsArt,
-              username,
-              projectName
-            );
-            try {
-              setMetrics(JSON.parse(t));
-            } catch {
-              setMetrics(null);
-            }
-          } catch {
-            setMetrics(null);
-          }
-        } else setMetrics(null);
-
-        if (confArt?.url) {
-          setConfusionURL(confArt.url);
-        }
-
-        if (csvArt) {
-          try {
-            const t2 = await fetchTextWithFallback(
-              csvArt,
-              username,
-              projectName
-            );
-            setCsvInfo(parseCSV(t2));
-            setCsvPage(1);
-          } catch {
-            setCsvInfo({ headers: [], rows: [] });
-          }
-        } else {
-          setCsvInfo({ headers: [], rows: [] });
-        }
-
-        if (logsArt) {
-          try {
-            const t3 = await fetchTextWithFallback(
-              logsArt,
-              username,
-              projectName
-            );
-            if (t3)
-              setLog(
-                (prev) =>
-                  (prev ? prev + "\n\n" : "") +
-                  "Logs:\n" +
-                  t3.slice(0, 5000)
-              );
-          } catch {}
-        }
-      } catch {}
-    })();
-  }, [artifacts, selectedRunId, recentRuns, username, projectName]);
-
+  /* ---------- derived ---------- */
+  const pageSize = 10;
   const filteredRows = useMemo(() => {
     if (!csvSearch.trim()) return csvInfo.rows;
     const q = csvSearch.toLowerCase();
-    const idxs = csvInfo.headers.map((_, i) => i);
-    return csvInfo.rows.filter((r) =>
-      idxs.some((i) =>
-        (r[i] || "").toString().toLowerCase().includes(q)
-      )
-    );
+    return csvInfo.rows.filter((r) => r.some((c) => (c || "").toLowerCase().includes(q)));
   }, [csvInfo, csvSearch]);
-  const pageSize = 10;
-  const totalPages = Math.max(
-    1,
-    Math.ceil(filteredRows.length / pageSize)
-  );
-  const pageRows = filteredRows.slice(
-    (csvPage - 1) * pageSize,
-    csvPage * pageSize
-  );
-  const statusIdx = csvInfo.headers.findIndex(
-    (h) => h.toLowerCase() === "status"
-  );
+  const pageRows = filteredRows.slice((csvPage - 1) * pageSize, csvPage * pageSize);
+  const statusIdx = csvInfo.headers.findIndex((h) => h.toLowerCase() === "status");
   const passFail = useMemo(() => {
     if (statusIdx === -1) return null;
     let pass = 0,
-      fail = 0,
-      other = 0;
+      fail = 0;
     csvInfo.rows.forEach((r) => {
       const v = (r[statusIdx] || "").toLowerCase();
       if (v.includes("pass")) pass++;
       else if (v.includes("fail")) fail++;
-      else other++;
     });
-    return { pass, fail, other, total: csvInfo.rows.length };
+    return { pass, fail, total: csvInfo.rows.length };
   }, [csvInfo, statusIdx]);
 
-  const statusBadge = (ok, label) => (
-    <Badge tone={ok ? "green" : "muted"}>{label}</Badge>
-  );
-
+  /* ---------- UI ---------- */
   return (
-    <div className="min-h-screen text-white p-4 space-y-4">
-      {/* Header */}
-      <div className="flex flex-col lg:flex-row lg:items-center gap-3">
-        <div className="flex-1">
-          <div className="text-[13px] text-white/60">Testing Suite</div>
-          <div className="text-2xl font-semibold tracking-wide">
-            Behaviour Testing
-          </div>
+    <div className="min-h-screen text-white relative">
+      {/* background glow */}
+      <div
+        className="pointer-events-none fixed inset-0 blur-3xl opacity-40"
+        style={{
+          background:
+            "radial-gradient(640px 320px at 85% 8%, rgba(212,175,55,0.25), transparent), radial-gradient(420px 240px at 10% 40%, rgba(80,80,120,0.3), transparent)",
+        }}
+      />
+
+      {/* header */}
+      <div className="sticky top-0 z-20 bg-[#0B0B1A]/80 backdrop-blur border-b border-white/10 px-5 py-4 flex items-center justify-between">
+        <div>
+          <div className="text-xs text-white/60">Testing Suite</div>
+          <div className="text-xl font-semibold">Behaviour Testing</div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-white/60">Project</span>
+        <div className="flex items-center gap-3">
           <select
             value={projectName}
             onChange={(e) => {
               setProjectName(e.target.value);
               localStorage.setItem("activeProject", e.target.value);
             }}
-            className="bg-[#121235] border border-white/10 rounded px-2 py-2 text-sm"
+            className="bg-transparent border px-2 py-1 rounded"
           >
-            {projects.length === 0 && <option value="">—</option>}
             {projects.map((p) => (
-              <option key={p} value={p}>
+              <option key={p} value={p} className="bg-black">
                 {p}
               </option>
             ))}
           </select>
-
-          <Btn
-            variant="primary"
-            onClick={runAll}
-            disabled={!projectName || ctaBusy}
-            className="ml-2"
-          >
-            {ctaBusy ? "Running…" : "Run Behaviour Tests"}
+          <Btn variant="primary" onClick={runAll} disabled={busy}>
+            {busy ? "Running…" : "Run Behaviour Tests"}
           </Btn>
         </div>
       </div>
 
-      {/* Overview / Console */}
-      <Card
-        title={
-          <div className="flex items-center gap-3">
-            <span>Run Overview</span>
-            {runId ? <Badge tone="blue">run #{runId}</Badge> : null}
-            {status && (
-              <>
-                {statusBadge(!!status?.isRunning, "Running")}
-                {statusBadge(!!status?.isDone, "Done")}
-                <Badge tone={status?.isSuccess ? "green" : "muted"}>
-                  Success
-                </Badge>
-              </>
-            )}
-          </div>
-        }
-        action={
-          <div className="text-xs text-white/50">
-            {projectName ? `Project: ${projectName}` : "Select a project"}
-          </div>
-        }
-      >
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="space-y-3">
-            <Step idx={1} label="Ensure project" state={stepState.ensure} />
-            <Step idx={2} label="Generate plan (LLM)" state={stepState.plan} />
-            <Step idx={3} label="Approve plan" state={stepState.approve} />
-            <Step idx={4} label="Start run" state={stepState.start} />
-          </div>
-          <div className="lg:col-span-2">
-            <div className="text-xs uppercase tracking-wider text-white/60 mb-2">
-              Console
+      <div className="max-w-7xl mx-auto p-5 space-y-6">
+        {/* stages + console (always present) */}
+        <Card title="Run Overview">
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-3">
+              <Step idx={1} label="Ensure project" state={stepState.ensure} />
+              <Step idx={2} label="Generate plan (LLM)" state={stepState.plan} />
+              <Step idx={3} label="Approve plan" state={stepState.approve} />
+              <Step idx={4} label="Start run" state={stepState.start} />
             </div>
-            <pre className="bg-black/40 border border-white/10 rounded p-3 text-xs max-h-[180px] overflow-auto whitespace-pre-wrap">
-              {log || "—"}
-            </pre>
+            <div>
+              <pre className="bg-black/30 rounded p-3 text-xs max-h-60 overflow-auto">
+                {runId
+                  ? consoleLines.join("\n") || "Streaming…"
+                  : "Console will appear after you start a run"}
+              </pre>
+            </div>
           </div>
-        </div>
+        </Card>
 
-        {/* Review & Edit panel */}
-        {showApprovePanel && (
-          <div className="mt-4 rounded-xl border border-white/10 p-3 bg-white/5">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-sm text-white/80">
-                Review & Edit before Approve
-              </div>
-              <div className="flex items-center gap-2">
-                <Btn
-                  variant="ghost"
-                  onClick={() => setShowApprovePanel(false)}
-                >
-                  Close
-                </Btn>
-                <Btn onClick={generateNewTests} disabled={genBusy}>
-                  {genBusy ? "Generating…" : "Generate New Testcases"}
-                </Btn>
-                <Btn
-                  variant="primary"
-                  onClick={approveAndRun}
-                  disabled={saveBusy}
-                >
-                  {saveBusy ? "Saving & Starting…" : "Approve & Run"}
-                </Btn>
-              </div>
+        {/* previous runs + tiny trend */}
+        <Card title="Previous Runs">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs text-white/60">
+              Accuracy trend (recent {trend.length || 0})
             </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div>
-                <div className="text-xs uppercase tracking-wider text-white/60 mb-1">
-                  driver.py{" "}
-                  <span className="text-white/40">
-                    (
-                    {driverKey ||
-                      `${username}/${projectName}/pre-processed/driver.py`}
-                    )
-                  </span>
-                </div>
-                <TextArea
-                  rows={18}
-                  value={driverText}
-                  onChange={(e) => setDriverText(e.target.value)}
-                />
-              </div>
-              <div>
-                <div className="text-xs uppercase tracking-wider text-white/60 mb-1">
-                  tests.yaml{" "}
-                  <span className="text-white/40">
-                    (
-                    {testsKey ||
-                      `${username}/${projectName}/pre-processed/tests.yaml`}
-                    )
-                  </span>
-                </div>
-                <TextArea
-                  rows={18}
-                  value={testsText}
-                  onChange={(e) => setTestsText(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="mt-2 text-[11px] text-white/60">
-              Tip: Each time you run, we also save a versioned copy of{" "}
-              <code>tests.yaml</code> under{" "}
-              <code>/pre-processed/tests/tests_YYYYMMDDHHMM.yaml</code> for
-              easy comparison.
-            </div>
-          </div>
-        )}
-      </Card>
-
-      {/* Previous Runs */}
-      <Card
-        title="Previous Runs"
-        action={
-          <div className="flex items-center gap-2">
-            <Btn variant="ghost" onClick={refreshRunsFromStorage}>
+            <Btn variant="ghost" onClick={refreshRuns}>
               Refresh
             </Btn>
-            <div className="text-xs text-white/50">
-              {recentRuns.length ? `${recentRuns.length} found` : "—"}
+          </div>
+
+          {trend.length ? (
+            <div className="h-24 mb-4">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trend.map((d, i) => ({ i, acc: d.acc }))}>
+                  <XAxis dataKey="i" hide />
+                  <YAxis domain={[0, 1]} hide />
+                  <Tooltip
+                    formatter={(v) => (v == null ? "—" : Number(v).toFixed(4))}
+                    labelFormatter={(i) => `Run ${trend[i]?.runId ?? ""}`}
+                  />
+                  <Line type="monotone" dataKey="acc" stroke="#FFD700" dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
-          </div>
-        }
-      >
-        {recentRuns.length ? (
-          <div className="overflow-auto rounded border border-white/10">
-            <table className="min-w-full text-sm">
-              <thead className="bg-[#101034] text-white/70">
-                <tr>
-                  <th className="px-3 py-2 text-left border-b border-white/10">
-                    Run
-                  </th>
-                  <th className="px-3 py-2 text-left border-b border-white/10">
-                    Artifacts Folder
-                  </th>
-                  <th className="px-3 py-2 text-right border-b border-white/10">
-                    Action
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentRuns.map((r) => (
-                  <tr
-                    key={r.runId}
-                    className={
-                      "odd:bg-white/5 hover:bg-white/10 transition " +
-                      (selectedRunId === r.runId ? "bg-white/10" : "")
-                    }
-                  >
-                    <td className="px-3 py-2">#{r.runId}</td>
-                    <td className="px-3 py-2">
-                      artifacts-behaviour/run_{r.runId}/
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      <Btn
-                        onClick={() => loadRunFromHistory(r.runId)}
-                        className="px-2 py-1"
-                      >
-                        View
-                      </Btn>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="text-white/60 text-sm">
-            No previous runs in S3 yet. They’ll appear as{" "}
-            <code>artifacts-behaviour/run_*/</code>.
-          </div>
-        )}
-      </Card>
+          ) : (
+            <div className="text-white/50 text-sm mb-4">No trend yet.</div>
+          )}
 
-      <ResultsSection
-        metrics={metrics}
-        confusionURL={confusionURL}
-        csvInfo={csvInfo}
-        csvSearch={csvSearch}
-        setCsvSearch={setCsvSearch}
-        csvPage={csvPage}
-        setCsvPage={setCsvPage}
-      />
-    </div>
-  );
-}
-
-/* ---------- Results section ---------- */
-function ResultsSection({
-  metrics,
-  confusionURL,
-  csvInfo,
-  csvSearch,
-  setCsvSearch,
-  csvPage,
-  setCsvPage,
-}) {
-  const filteredRows = useMemo(() => {
-    if (!csvSearch.trim()) return csvInfo.rows;
-    const q = csvSearch.toLowerCase();
-    const idxs = csvInfo.headers.map((_, i) => i);
-    return csvInfo.rows.filter((r) =>
-      idxs.some((i) =>
-        (r[i] || "").toString().toLowerCase().includes(q)
-      )
-    );
-  }, [csvInfo, csvSearch]);
-  const pageSize = 10;
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
-  const pageRows = filteredRows.slice(
-    (csvPage - 1) * pageSize,
-    csvPage * pageSize
-  );
-  const statusIdx = csvInfo.headers.findIndex(
-    (h) => h.toLowerCase() === "status"
-  );
-  const passFail = useMemo(() => {
-    if (statusIdx === -1) return null;
-    let pass = 0,
-      fail = 0,
-      other = 0;
-    csvInfo.rows.forEach((r) => {
-      const v = (r[statusIdx] || "").toLowerCase();
-      if (v.includes("pass")) pass++;
-      else if (v.includes("fail")) fail++;
-      else other++;
-    });
-    return { pass, fail, other, total: csvInfo.rows.length };
-  }, [csvInfo, statusIdx]);
-
-  return (
-    <Card title="Test Results">
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <div className="space-y-3">
-          <div className="text-xs uppercase tracking-wider text-white/60">
-            Metrics
-          </div>
-          {metrics ? (
-            <div className="grid grid-cols-2 gap-2">
-              {Object.entries(metrics).map(([k, v]) => (
-                <div key={k} className="rounded border border-white/10 p-3">
-                  <div className="text-[11px] text-white/60">{k}</div>
-                  <div className="text-xl">
-                    {typeof v === "number" ? v.toFixed(4) : String(v)}
-                  </div>
-                </div>
+          {runs.length ? (
+            <div className="flex flex-wrap gap-2">
+              {runs.map((r) => (
+                <Btn
+                  key={r.runId}
+                  className={
+                    (selectedRunId === r.runId
+                      ? "border-yellow-400/60 text-yellow-300 "
+                      : " ") + "px-3 py-1.5"
+                  }
+                  onClick={() => setSelectedRunId(r.runId)}
+                >
+                  run_{r.runId}
+                </Btn>
               ))}
             </div>
           ) : (
             <div className="text-white/60 text-sm">
-              Waiting for metrics.json…
+              No previous runs yet. They’ll appear in <code>artifacts-behaviour/run_*/</code>.
             </div>
           )}
-        </div>
+        </Card>
 
-        <div className="space-y-3">
-          <div className="text-xs uppercase tracking-wider text-white/60">
-            Confusion Matrix
-          </div>
-          {confusionURL ? (
-            <div className="bg-black/30 p-2 flex items-center justify-center rounded border border-white/10">
-              <img
-                src={confusionURL}
-                alt="Confusion matrix"
-                className="max-h-72 object-contain"
+
+        {/* editors only at stage 3 */}
+        {stepState.approve === "doing" && (
+          <Card title="Review & Edit Files">
+            <div className="flex gap-2 mb-3 border-b border-white/10 overflow-x-auto">
+              {files.map((f) => (
+                <button
+                  key={f.name}
+                  onClick={() => setActiveFile(f.name)}
+                  className={`px-3 py-1 text-sm ${
+                    activeFile === f.name
+                      ? "border-b-2 border-yellow-400 text-yellow-300"
+                      : "text-white/60"
+                  }`}
+                >
+                  {f.name}
+                </button>
+              ))}
+            </div>
+            {activeFile && (
+              <Editor
+                height="420px"
+                language={files.find((f) => f.name === activeFile)?.language || "plaintext"}
+                theme="vs-dark"
+                value={files.find((f) => f.name === activeFile)?.content || ""}
+                onChange={(v) =>
+                  setFiles((prev) =>
+                    prev.map((f) => (f.name === activeFile ? { ...f, content: v || "" } : f))
+                  )
+                }
+                options={{ minimap: { enabled: false }, fontSize: 14 }}
               />
+            )}
+            <div className="flex gap-2 mt-3">
+              <Btn variant="primary" onClick={approveAndRun} disabled={busy}>
+                Approve & Run
+              </Btn>
             </div>
-          ) : (
-            <div className="text-white/60 text-sm">
-              No confusion matrix available.
-            </div>
-          )}
-        </div>
+          </Card>
+        )}
 
-        <div className="space-y-3">
-          <div className="text-xs uppercase tracking-wider text-white/60">
-            Testcase Summary
-          </div>
-          {csvInfo.headers.length ? (
-            passFail ? (
-              <div className="grid grid-cols-3 gap-2">
-                <StatCard label="Passed" value={passFail.pass} tone="green" />
-                <StatCard label="Failed" value={passFail.fail} tone="red" />
-                <StatCard label="Other" value={passFail.other} />
-                <div className="col-span-3 text-[11px] text-white/60 mt-1">
-                  Total rows: {passFail.total}
-                </div>
-              </div>
-            ) : (
-              <div className="text-white/60 text-sm">
-                CSV found. No <code>status</code> column detected.
-              </div>
-            )
-          ) : (
-            <div className="text-white/60 text-sm">
-              Waiting for tests/results CSV…
+        {/* results */}
+        <Card title="Test Results">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <div className="text-sm mb-2">Metrics</div>
+              {metrics ? (
+                <ResponsiveContainer width="100%" height={200}>
+                  <LineChart
+                    data={Object.entries(metrics).map(([k, v]) => ({
+                      name: k,
+                      value: typeof v === "number" ? v : null,
+                    }))}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#555" />
+                    <XAxis dataKey="name" stroke="#aaa" />
+                    <YAxis stroke="#aaa" />
+                    <Tooltip formatter={(v) => (v == null ? "—" : Number(v).toFixed(4))} />
+                    <Line type="monotone" dataKey="value" stroke="#FFD700" />
+                  </LineChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="text-white/60 text-sm">No metrics yet.</div>
+              )}
             </div>
-          )}
-        </div>
-      </div>
-
-      <div className="mt-5">
-        <div className="flex items-center gap-2">
-          <div className="text-xs uppercase tracking-wider text-white/60">
-            Testcases (CSV)
-          </div>
-          <Input
-            placeholder="Search…"
-            value={csvSearch}
-            onChange={(e) => {
-              setCsvSearch(e.target.value);
-              setCsvPage(1);
-            }}
-            className="ml-3 w-64"
-          />
-          {!!csvInfo.headers.length && (
-            <div className="ml-auto text-xs text-white/60">
-              Page {csvPage}/{totalPages} • {filteredRows.length} rows
+            <div>
+              <div className="text-sm mb-2">Confusion Matrix</div>
+              {confusionURL ? (
+                <img src={confusionURL} alt="Confusion" className="max-h-60" />
+              ) : (
+                <div className="text-white/60 text-sm">No confusion matrix.</div>
+              )}
             </div>
-          )}
-       
-        </div>
-
-        {csvInfo.headers.length ? (
-          <div className="mt-2 overflow-auto rounded border border-white/10">
-            <table className="min-w-full text-sm">
-              <thead className="bg-[#101034] text-white/70">
-                <tr>
-                  {csvInfo.headers.map((h, i) => (
-                    <th
-                      key={i}
-                      className="px-3 py-2 text-left whitespace-nowrap border-b border-white/10"
+            <div>
+              <div className="text-sm mb-2">Pass/Fail</div>
+              {passFail ? (
+                <ResponsiveContainer width="100%" height={200}>
+                  <PieChart>
+                    <Pie
+                      data={[
+                        { name: "Pass", value: passFail.pass },
+                        { name: "Fail", value: passFail.fail },
+                      ]}
+                      dataKey="value"
+                      outerRadius={80}
+                      label
                     >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {pageRows.map((row, rIdx) => (
-                  <tr key={rIdx} className="odd:bg-white/5">
-                    {row.map((cell, cIdx) => (
-                      <td
-                        key={cIdx}
-                        className="px-3 py-2 whitespace-pre-wrap border-b border-white/5"
-                      >
-                        {cell}
-                      </td>
+                      <Cell fill="#22c55e" />
+                      <Cell fill="#ef4444" />
+                    </Pie>
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="text-white/60 text-sm">No summary.</div>
+              )}
+            </div>
+          </div>
+
+          {/* CSV table */}
+          <div className="mt-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Input
+                placeholder="Search…"
+                value={csvSearch}
+                onChange={(e) => {
+                  setCsvSearch(e.target.value);
+                  setCsvPage(1);
+                }}
+                className="w-64"
+              />
+              <div className="ml-auto text-xs text-white/60">
+                Page {csvPage} / {Math.max(1, Math.ceil(filteredRows.length / pageSize))}
+              </div>
+            </div>
+            <div className="overflow-auto border border-white/10 rounded">
+              <table className="min-w-full text-sm">
+                <thead className="bg-[#13131F] text-white/70">
+                  <tr>
+                    {csvInfo.headers.map((h, i) => (
+                      <th key={i} className="px-3 py-2 text-left border-b border-white/10">
+                        {h}
+                      </th>
                     ))}
                   </tr>
-                ))}
-                {!pageRows.length && (
-                  <tr>
-                    <td
-                      className="px-3 py-3 text-white/60"
-                      colSpan={csvInfo.headers.length}
-                    >
-                      No rows on this page.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {pageRows.map((row, rIdx) => (
+                    <tr key={rIdx} className="odd:bg-white/5">
+                      {row.map((cell, cIdx) => (
+                        <td key={cIdx} className="px-3 py-2 border-b border-white/5">
+                          {cell}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                  {!pageRows.length && (
+                    <tr>
+                      <td colSpan={csvInfo.headers.length} className="px-3 py-2 text-white/60">
+                        No rows
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex gap-2 mt-2">
+              <Btn onClick={() => setCsvPage((p) => Math.max(1, p - 1))}>Prev</Btn>
+              <Btn
+                onClick={() =>
+                  setCsvPage((p) => Math.min(Math.ceil(filteredRows.length / pageSize), p + 1))
+                }
+              >
+                Next
+              </Btn>
+            </div>
           </div>
-        ) : (
-          <div className="text-white/60 text-sm mt-2">—</div>
-        )}
-
-        {!!csvInfo.headers.length && (
-          <div className="flex items-center gap-2 mt-3">
-            <Btn onClick={() => setCsvPage((p) => Math.max(1, p - 1))}>
-              Prev
-            </Btn>
-            <Btn onClick={() => setCsvPage((p) => Math.min(totalPages, p + 1))}>
-              Next
-            </Btn>
-          </div>
-        )}
+        </Card>
       </div>
-    </Card>
-  );
-}
-
-/* ---------- minor components ---------- */
-function StatCard({ label, value, tone = "muted" }) {
-  const borders = {
-    green: "border-emerald-300/30",
-    red: "border-rose-300/30",
-    muted: "border-white/15",
-  }[tone];
-  const color = {
-    green: "text-emerald-300",
-    red: "text-rose-300",
-    muted: "text-white",
-  }[tone];
-  return (
-    <div className={`rounded border ${borders} p-3`}>
-      <div className="text-[11px] text-white/60">{label}</div>
-      <div className={`text-xl ${color}`}>{value}</div>
     </div>
-  );
-}
-
-function ArtifactPreview({ artifact, username, projectName }) {
-  const { url, mime, name, s3Key } = artifact || {};
-  const lower = (mime || "").toLowerCase();
-  if (!url) return <div className="p-3 text-white/60 text-sm">No URL.</div>;
-  if (lower.startsWith("image/")) {
-    return (
-      <div className="bg-black/30 p-2 flex items-center justify-center">
-        <img
-          src={url}
-          alt={name || s3Key}
-          className="max-h-64 object-contain"
-        />
-      </div>
-    );
-  }
-  if (lower.includes("json"))
-    return (
-      <JsonPreview
-        artifact={artifact}
-        username={username}
-        projectName={projectName}
-      />
-    );
-  if (lower.includes("csv") || lower.startsWith("text/"))
-    return (
-      <TextPreview
-        artifact={artifact}
-        username={username}
-        projectName={projectName}
-      />
-    );
-  return (
-    <div className="p-3 text-white/60 text-sm">
-      Preview not supported.{" "}
-      <a className="underline" href={url} target="_blank" rel="noreferrer">
-        Open
-      </a>
-    </div>
-  );
-}
-
-function JsonPreview({ artifact, username, projectName }) {
-  const [txt, setTxt] = useState("");
-  useEffect(() => {
-    (async () => {
-      try {
-        const t = await fetchTextWithFallback(artifact, username, projectName);
-        try {
-          setTxt(JSON.stringify(JSON.parse(t), null, 2));
-        } catch {
-          setTxt(t);
-        }
-      } catch {
-        setTxt("Failed to fetch JSON.");
-      }
-    })();
-  }, [artifact, username, projectName]);
-  return (
-    <pre className="bg-black/40 border-t border-white/10 p-3 text-xs max-h-64 overflow-auto whitespace-pre">
-      {txt || "—"}
-    </pre>
-  );
-}
-
-function TextPreview({ artifact, username, projectName }) {
-  const [txt, setTxt] = useState("");
-  useEffect(() => {
-    (async () => {
-      try {
-        const t = await fetchTextWithFallback(artifact, username, projectName);
-        setTxt(t);
-      } catch {
-        setTxt("Failed to fetch text.");
-      }
-    })();
-  }, [artifact, username, projectName]);
-  return (
-    <pre className="bg-black/40 border-t border-white/10 p-3 text-xs max-h-64 overflow-auto whitespace-pre-wrap">
-      {txt || "—"}
-    </pre>
   );
 }

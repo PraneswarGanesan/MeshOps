@@ -1,7 +1,16 @@
+// src/components/OTPPage.jsx
 import React, { useState } from "react";
 import { useLocation, useNavigate, Link } from "react-router-dom";
 
-const OTPPage = () => {
+const GOLD = "#D4AF37";
+const GOLD_SOFT = "#B69121";
+const BORDER = "rgba(255,255,255,0.18)";
+
+// Background image (swap to your brand image if you want)
+const BG_IMG =
+  "https://images.unsplash.com/photo-1637270866876-86f0b1acfe7c?q=80&w=1600&auto=format&fit=crop";
+
+export default function OTPPage() {
   const [otpInput, setOtpInput] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -16,7 +25,6 @@ const OTPPage = () => {
     e.preventDefault();
     setError("");
     setIsLoading(true);
-
     try {
       if (!serverOtp || !token || !username) {
         setError("Invalid session. Please login again.");
@@ -35,38 +43,108 @@ const OTPPage = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#000000] text-white flex items-center justify-center px-4">
-      <div className="w-full max-w-md bg-[#0A0A29] border border-[#2A2A4A] rounded-lg p-8">
-        <h2 className="text-2xl font-semibold mb-6">Verify OTP</h2>
-        <p className="text-white/70 text-sm mb-4">
-          We’ve sent a 6-digit code to <span className="text-white">{username || "your account"}</span>
-        </p>
+    <div className="relative min-h-screen w-full overflow-hidden">
+      {/* Background image only (hero style) */}
+      <div className="absolute inset-0">
+        <img
+          src={BG_IMG}
+          alt=""
+          className="w-full h-full object-cover"
+          loading="eager"
+        />
+        {/* subtle golden/black overlay for contrast */}
+        <div
+          className="absolute inset-0"
+          style={{
+            background:
+              "linear-gradient(120deg, rgba(0,0,0,0.82) 0%, rgba(10,10,41,0.78) 45%, rgba(212,175,55,0.12) 70%, rgba(0,0,0,0.70) 100%)",
+          }}
+        />
+      </div>
 
-        {error && <div className="bg-red-600 text-white text-sm p-3 rounded mb-4">{error}</div>}
+      {/* centered card */}
+      <div className="relative z-10 min-h-screen flex items-center justify-center px-4">
+        <div
+          className="w-full max-w-md rounded-2xl p-8"
+          style={{
+            color: "white",
+            background:
+              "linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.05))",
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+            border: `1px solid ${BORDER}`,
+            boxShadow:
+              "0 20px 60px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.06)",
+          }}
+        >
+          {/* brand */}
+          <div className="mb-6">
+            <div className="text-xl font-semibold tracking-wide">
+              <span style={{ color: GOLD }}>M</span>eshops
+            </div>
+            <div
+              className="mt-2 h-[2px] w-12"
+              style={{ background: GOLD }}
+            />
+          </div>
 
-        <form onSubmit={onSubmit} className="space-y-4">
-          <input
-            value={otpInput}
-            onChange={(e) => setOtpInput(e.target.value)}
-            maxLength={6} placeholder="Enter 6-digit OTP" required
-            className="w-full p-3 bg-[#1A1A3B] border border-[#2A2A4A] rounded placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-white"
-          />
-          <button
-            type="submit" disabled={isLoading}
-            className={`w-full py-3 rounded font-semibold transition ${
-              isLoading ? "bg-[#2A2A4A] cursor-not-allowed" : "bg-white text-black hover:bg-[#eaeaea]"
-            }`}
-          >
-            {isLoading ? "Verifying..." : "Verify"}
-          </button>
-        </form>
+          <h2 className="text-2xl font-semibold mb-2">Verify OTP</h2>
+          <p className="text-white/85 text-sm mb-5">
+            Enter the 6-digit code sent to{" "}
+            <span className="text-white font-medium">
+              {username || "your account"}
+            </span>
+            .
+          </p>
 
-        <p className="mt-6 text-center text-sm text-white/70">
-          <Link to="/login" className="underline">Back to Login</Link>
-        </p>
+          {error && (
+            <div className="bg-rose-600/90 text-white text-sm p-3 rounded mb-4">
+              {error}
+            </div>
+          )}
+
+          <form onSubmit={onSubmit} className="space-y-4">
+            <input
+              value={otpInput}
+              onChange={(e) =>
+                setOtpInput(e.target.value.replace(/\D/g, ""))
+              }
+              maxLength={6}
+              inputMode="numeric"
+              autoFocus
+              className="w-full p-3 rounded outline-none bg-black/35 border text-white placeholder-white/60 tracking-[0.6em] text-center font-mono text-lg"
+              style={{
+                borderColor: "rgba(255,255,255,0.22)",
+                boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.05)",
+              }}
+            />
+
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="w-full py-3 rounded font-medium transition text-black"
+              style={{
+                background: isLoading
+                  ? "linear-gradient(180deg, rgba(255,255,255,0.78), rgba(255,255,255,0.78))"
+                  : `linear-gradient(180deg, ${GOLD}, ${GOLD_SOFT})`,
+                boxShadow: "0 12px 28px rgba(212,175,55,0.25)",
+                opacity: isLoading ? 0.85 : 1,
+              }}
+            >
+              {isLoading ? "Verifying…" : "Verify"}
+            </button>
+          </form>
+
+          <div className="mt-6 text-center text-sm">
+            <Link
+              to="/login"
+              className="underline text-white/90 hover:text-white"
+            >
+              Back to Login
+            </Link>
+          </div>
+        </div>
       </div>
     </div>
   );
-};
-
-export default OTPPage;
+}

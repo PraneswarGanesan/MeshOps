@@ -242,130 +242,135 @@ public class RunService {
 
     private String ubuntuUserData() {
         return """
-        #!/bin/bash
-        set -eux
-        apt-get update -y
-        apt-get install -y snapd python3 python3-pip
-        snap install amazon-ssm-agent --classic || true
-        systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
-        systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+    #!/bin/bash
+    set -eux
+    apt-get update -y
+    apt-get install -y snapd python3 python3-pip
+    snap install amazon-ssm-agent --classic || true
+    systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+    systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
-        # Install safe baseline dependencies
-        pip3 install boto3 scikit-learn matplotlib pandas numpy pyyaml pillow
+    # Install safe baseline dependencies
+    pip3 install boto3 scikit-learn matplotlib pandas numpy pyyaml pillow
 
-        mkdir -p /opt/automesh
-        cat > /opt/automesh/runner.py <<'PYEOF'
-        #!/usr/bin/env python3
-        import os, sys, subprocess, json, boto3, traceback
+    mkdir -p /opt/automesh
+    cat > /opt/automesh/runner.py <<'PYEOF'
+    #!/usr/bin/env python3
+    import os, sys, subprocess, json, boto3, traceback
 
-        def parse_s3(uri):
-            uri = uri.replace("s3://", "")
-            bucket, key = uri.split("/", 1)
-            return bucket, key
+    def parse_s3(uri):
+        uri = uri.replace("s3://", "")
+        bucket, key = uri.split("/", 1)
+        return bucket, key
 
-        def upload_file(s3, local, bucket, key):
-            if os.path.exists(local):
-                s3.upload_file(local, bucket, key)
+    def upload_file(s3, local, bucket, key):
+        if os.path.exists(local):
+            s3.upload_file(local, bucket, key)
 
-        def main():
-            if len(sys.argv) < 9:
-                print("Usage: runner.py --base_s3 <s3://...> --out_s3 <s3://...> --task <task> --run_id <id>")
-                sys.exit(1)
+    def main():
+        if len(sys.argv) < 9:
+            print("Usage: runner.py --base_s3 <s3://...> --out_s3 <s3://...> --task <task> --run_id <id>")
+            sys.exit(1)
 
-            args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-            base_s3 = args.get("--base_s3")
-            out_s3  = args.get("--out_s3")
-            task    = args.get("--task")
-            run_id  = args.get("--run_id")
+        args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+        base_s3 = args.get("--base_s3")
+        out_s3  = args.get("--out_s3")
+        task    = args.get("--task")
+        run_id  = args.get("--run_id")
 
-            bucket, base_prefix = parse_s3(base_s3)
-            _, out_prefix = parse_s3(out_s3)
-            workdir = f"/tmp/run_{run_id}"
-            os.makedirs(workdir, exist_ok=True)
+        bucket, base_prefix = parse_s3(base_s3)
+        _, out_prefix = parse_s3(out_s3)
+        workdir = f"/tmp/run_{run_id}"
+        os.makedirs(workdir, exist_ok=True)
 
-            s3 = boto3.client("s3")
+        s3 = boto3.client("s3")
 
-            # 1. Download available project files
-            files = ["driver.py","tests.yaml","dataset.csv","train.py","predict.py","requirements.txt"]
-            for f in files:
-                try:
-                    s3.download_file(bucket, f"{base_prefix}/{f}", os.path.join(workdir,f))
-                    print(f"Downloaded {f}")
-                except Exception:
-                    pass
-
-            # 1b. Download all images under pre-processed/images/
-            paginator = s3.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=bucket, Prefix=f"{base_prefix}/images/"):
-                for obj in page.get("Contents", []):
-                    key = obj["Key"]
-                    rel_path = key.replace(base_prefix + "/", "")
-                    local_path = os.path.join(workdir, rel_path)
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    try:
-                        s3.download_file(bucket, key, local_path)
-                        print(f"Downloaded {key} -> {local_path}")
-                    except Exception as e:
-                        print(f"[skip] {key}: {e}")
-
-            # 2. Install dependencies
-            reqs = os.path.join(workdir, "requirements.txt")
-            if os.path.exists(reqs):
-                print("Installing project requirements...")
-                subprocess.run([sys.executable,"-m","pip","install","-r",reqs],check=False)
-            else:
-                print("No requirements.txt found, using baseline packages already installed.")
-
-            # 3. Run driver.py
-            driver = os.path.join(workdir,"driver.py")
-            log_path = os.path.join(workdir,"logs.txt")
+        # 1. Download available project files
+        files = ["driver.py","tests.yaml","dataset.csv","train.py","predict.py","requirements.txt"]
+        for f in files:
             try:
-                with open(log_path,"w") as logf:
-                    subprocess.run([sys.executable,driver,"--base_dir",workdir],
-                                   stdout=logf,stderr=logf,check=False)
+                s3.download_file(bucket, f"{base_prefix}/{f}", os.path.join(workdir,f))
+                print(f"Downloaded {f}")
             except Exception:
-                with open(log_path,"a") as logf:
-                    traceback.print_exc(file=logf)
+                pass
 
-            # 4. Ensure metrics.json exists
-            metrics_path = os.path.join(workdir,"metrics.json")
-            if not os.path.exists(metrics_path):
-                metrics = {}
+        # 1b. Download all images under pre-processed/images/
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=f"{base_prefix}/images/"):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                rel_path = key.replace(base_prefix + "/", "")
+                local_path = os.path.join(workdir, rel_path)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 try:
-                    with open(log_path) as f:
-                        for line in f:
-                            for m in ["Accuracy","Precision","Recall","F1-score"]:
-                                if line.strip().startswith(m):
-                                    try:
-                                        metrics[m.lower().replace("-score","")] = float(line.split(":")[1])
-                                    except:
-                                        pass
-                    if metrics:
-                        with open(metrics_path,"w") as f: json.dump(metrics,f)
-                except:
-                    pass
+                    s3.download_file(bucket, key, local_path)
+                    print(f"Downloaded {key} -> {local_path}")
+                except Exception as e:
+                    print(f"[skip] {key}: {e}")
 
-            # 5. Create tests.csv
-            tests_path = os.path.join(workdir,"tests.csv")
+        # 2. Install dependencies
+        reqs = os.path.join(workdir, "requirements.txt")
+        if os.path.exists(reqs):
+            print("Installing project requirements...")
+            subprocess.run([sys.executable,"-m","pip","install","-r",reqs],check=False)
+        else:
+            print("No requirements.txt found, using baseline packages already installed.")
+
+        # 3. Run driver.py
+        driver = os.path.join(workdir,"driver.py")
+        log_path = os.path.join(workdir,"logs.txt")
+        try:
+            with open(log_path,"w") as logf:
+                subprocess.run([sys.executable,driver,"--base_dir",workdir],
+                               stdout=logf,stderr=logf,check=False)
+        except Exception:
+            with open(log_path,"a") as logf:
+                traceback.print_exc(file=logf)
+
+        # 4. Ensure metrics.json exists (scrape from logs if needed)
+        metrics_path = os.path.join(workdir,"metrics.json")
+        if not os.path.exists(metrics_path):
+            metrics = {}
             try:
-                rows=["name,category,severity,result,value,threshold,metric"]
-                if os.path.exists(metrics_path):
-                    with open(metrics_path) as f: metrics=json.load(f)
-                    for k,v in metrics.items():
-                        rows.append(f"{k},Quality,high,PASS,{v},0.0,{k}")
-                with open(tests_path,"w") as f: f.write("\\n".join(rows))
+                with open(log_path) as f:
+                    for line in f:
+                        for m in ["Accuracy","Precision","Recall","F1-score"]:
+                            if line.strip().startswith(m):
+                                try:
+                                    metrics[m.lower().replace("-score","")] = float(line.split(":")[1])
+                                except:
+                                    pass
+                if metrics:
+                    with open(metrics_path,"w") as f: json.dump(metrics,f)
             except:
                 pass
 
-            # 6. Upload artifacts
-            for f in ["metrics.json","tests.csv","confusion_matrix.png","logs.txt"]:
-                upload_file(s3, os.path.join(workdir,f), bucket, f"{out_prefix}/{f}")
+        # 5. Use driver's tests.csv if it exists, else fallback to metrics summary
+        tests_path = os.path.join(workdir,"tests.csv")
+        if not os.path.exists(tests_path) or os.path.getsize(tests_path) == 0:
+        else:
+            try:
+                rows = ["name,category,severity,result,value,threshold,metric"]
+                if os.path.exists(metrics_path):
+                    with open(metrics_path) as f:
+                        metrics = json.load(f)
+                    for k, v in metrics.items():
+                        rows.append(f"{k},Quality,high,PASS,{v},0.0,{k}")
+                with open(tests_path, "w") as f:
+                    f.write("\\n".join(rows))
+                print("Fallback tests.csv created from metrics.json")
+            except Exception as e:
+                print(f"Failed to create fallback tests.csv: {e}")
 
-        if __name__=="__main__":
-            main()
-        PYEOF
-        chmod +x /opt/automesh/runner.py
-        """;
+        # 6. Upload artifacts
+        for f in ["metrics.json","tests.csv","confusion_matrix.png","logs.txt"]:
+            upload_file(s3, os.path.join(workdir,f), bucket, f"{out_prefix}/{f}")
+
+    if __name__=="__main__":
+        main()
+    PYEOF
+    chmod +x /opt/automesh/runner.py
+    """;
     }
 
     // ============ helpers ============

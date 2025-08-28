@@ -10,14 +10,14 @@ const SidePanel = () => {
     { path: "/", label: "HOME" },
     { path: "/dashboard/storage", label: "STORAGE" },
      { path: "/dashboard/pre-process", label: "PRE PROCESS" },
-     { path: "/dashboard/behaviour-test", label: "bheaviour testS" },
+     { path: "/dashboard/behaviour-test", label: "BEHAVIOUR TEST" },
     // { path: "/dashboard/get-analytics", label: "PRE PROCESS" },
     // { path: "/dashboard/select-device", label: "BEHAVIOUR TEST" },
   ];
 
   return (
-    <aside className={`${collapsed ? "w-20" : "w-64"} transition-all duration-300 bg-[#000000] border-r border-[#2A2A4A] min-h-screen`}>
-      <div className="p-6 border-b border-[#2A2A4A] flex items-center justify-between">
+    <aside className={`${collapsed ? "w-20" : "w-64"} transition-all duration-300 bg-[#000000] border-r border-[#1c2e3c] min-h-screen`}>
+      <div className="p-6 border-b border-[#2d4455] flex items-center justify-between">
         {!collapsed && <div className="text-white tracking-wider">MESHOPS</div>}
         <button className="text-white/60 hover:text-white" onClick={() => setCollapsed(!collapsed)}>
           {collapsed ? "»" : "«"}
@@ -31,8 +31,8 @@ const SidePanel = () => {
             to={it.path}
             className={`px-4 py-3 rounded border ${
               isActive(it.path)
-                ? "border-white/30 bg-[#1A1A3B] text-white"
-                : "border-transparent text-white/70 hover:border-white/20 hover:bg-[#1A1A3B]/50"
+                ? "border-white/30 bg-[#1c2e3c] text-white"
+                : "border-transparent text-white/70 hover:border-white/20 hover:bg-[#1c2e3c]/50"
             } ${collapsed ? "text-center" : ""}`}
           >
             {collapsed ? it.label[0] : it.label}

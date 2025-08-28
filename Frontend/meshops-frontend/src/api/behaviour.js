@@ -12,34 +12,41 @@ API.interceptors.request.use((cfg) => {
   return cfg;
 });
 
-// -------- Projects --------
+// Storage service base (for file helpers below)
+const BASE_STORAGE = "http://localhost:8081";
+
+/* ---------------- Projects ---------------- */
 export const ensureProject = (req /* {username, projectName, s3Prefix} */) =>
   API.post("/api/projects/ensure", req);
 
-// -------- Plans --------
+/* ---------------- Plans ---------------- */
 export const generatePlan = (username, projectName, req /* {brief, files[]} */) =>
-  API.post(`/api/plans/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/generate`, req);
+  API.post(
+    `/api/plans/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/generate`,
+    req
+  );
 
 export const approvePlan = (req /* {username, projectName, driverKey, testsKey, s3Prefix, approved} */) =>
   API.post("/api/plans/approve", req);
 
-// NEW: list all tests (canonical + versions)
 export const listTests = (username, projectName) =>
-  API.get(`/api/plans/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/tests`);
+  API.get(
+    `/api/plans/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/tests`
+  );
 
-// NEW: generate a fresh, versioned tests.yaml (driver not touched)
-// req: { brief, files, s3Prefix?, versionLabel?, activate? }
-// NEW: generate a fresh, versioned tests.yaml
 export const generateTestsNow = (username, projectName, req) =>
-  API.post(`/api/plans/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/tests/new`, req);
+  API.post(
+    `/api/plans/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/tests/new`,
+    req
+  );
 
-
-// NEW: activate a chosen version as canonical tests.yaml
-// req: { key, s3Prefix? }
 export const activateTests = (username, projectName, req) =>
-  API.post(`/api/plans/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/tests/activate`, req);
+  API.post(
+    `/api/plans/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/tests/activate`,
+    req
+  );
 
-// -------- Runs --------
+/* ---------------- Runs ---------------- */
 export const startRun = (req /* {username, projectName, task, instanceId?} */) =>
   API.post("/api/runs/start", req);
 
@@ -47,21 +54,22 @@ export const getRunStatus = (runId) =>
   API.get(`/api/runs/${encodeURIComponent(runId)}/status`);
 
 export const pollRun = (runId) =>
-  API.post(`/api/runs/${encodeURIComponent(runId)}/poll`);
+  API.get(`/api/runs/${encodeURIComponent(runId)}/poll`);
 
 export const listArtifacts = (runId) =>
   API.get(`/api/runs/${encodeURIComponent(runId)}/artifacts`);
 
-// OPTIONAL (if you want console in UI later)
-// export const getConsole = (runId) =>
-//   API.get(`/api/runs/${encodeURIComponent(runId)}/console`, { responseType: "text" });
-// --- add this helper ---
+// optional: console endpoint if backend supports
+export const getConsole = (runId) =>
+  API.get(`/api/runs/${encodeURIComponent(runId)}/console`, {
+    responseType: "text",
+  });
+
+/* ---------------- S3 Helpers ---------------- */
 function normalizeKey(key) {
   if (!key) return "";
-  // strip leading "s3://bucket/"
   const m = /^s3:\/\/[^/]+\/(.+)$/.exec(key);
   if (m) return m[1];
-  // strip accidental leading slash
   if (key.startsWith("/")) return key.slice(1);
   return key;
 }
@@ -74,17 +82,39 @@ function splitKey(key) {
   return { folder, fileName };
 }
 
-async function downloadS3Text(username, projectName, key) {
+export async function downloadS3Text(username, projectName, key) {
   const { folder, fileName } = splitKey(key);
-  const url = `${BASE_STORAGE}/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/download/${encodeURIComponent(fileName)}?folder=${encodeURIComponent(folder)}`;
+  const url = `${BASE_STORAGE}/api/user-storage/${encodeURIComponent(
+    username
+  )}/projects/${encodeURIComponent(
+    projectName
+  )}/download/${encodeURIComponent(fileName)}?folder=${encodeURIComponent(
+    folder
+  )}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error("download failed: " + r.status);
   return await r.text();
 }
 
-async function uploadS3Text(username, projectName, key, content, contentType = "text/plain") {
+export async function uploadS3Text(
+  username,
+  projectName,
+  key,
+  content,
+  contentType = "text/plain"
+) {
   const { folder, fileName } = splitKey(key);
-  const url = `${BASE_STORAGE}/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/upload/${encodeURIComponent(fileName)}?folder=${encodeURIComponent(folder)}`;
-  const r = await fetch(url, { method: "PUT", headers: { "Content-Type": contentType }, body: content });
+  const url = `${BASE_STORAGE}/api/user-storage/${encodeURIComponent(
+    username
+  )}/projects/${encodeURIComponent(
+    projectName
+  )}/upload/${encodeURIComponent(fileName)}?folder=${encodeURIComponent(
+    folder
+  )}`;
+  const r = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: content,
+  });
   if (!r.ok) throw new Error("upload failed: " + r.status);
 }

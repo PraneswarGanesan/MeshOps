@@ -68,34 +68,61 @@ public class ValidataionService {
 
         helper.setTo(to);
         helper.setSubject("MeshOps.AI - Your OTP Code");
-        helper.setFrom(emailSender);
-
         String htmlContent = """
-       <html>
-       <body style="margin:0; padding:0; background-color: #020617; font-family: 'Segoe UI', Arial, sans-serif; color: #E0F2FE;">
-           <div style="max-width: 600px; margin: 40px auto; padding: 30px; background: rgba(2,6,23,0.9); border-radius: 12px; box-shadow: 0px 0px 25px rgba(56,189,248,0.3); text-align: center;">
-               <h1 style="font-size: 28px; font-weight: 600; color: #38bdf8; letter-spacing: 2px; margin-bottom: 10px;">
-                   MeshOps<span style="color:#0ea5e9;">.AI</span>
-               </h1>
-               <p style="font-size: 15px; color: #94a3b8; margin-bottom: 20px;">
-                   Your One-Time Password for verification is:
-               </p>
-               <div style="display: inline-block; background: linear-gradient(90deg, #0ea5e9, #38bdf8); padding: 15px 40px; border-radius: 8px; box-shadow: 0px 0px 20px rgba(56,189,248,0.6);">
-                   <span style="font-size: 32px; font-weight: bold; color: #020617;">
-       """ + otp + """
-                   </span>
-               </div>
-               <p style="font-size: 13px; color: #64748b; margin-top: 25px;">
-                   This OTP is valid for <strong>5 minutes</strong>. Do not share it with anyone.
-               </p>
-               <hr style="border: none; border-top: 1px solid rgba(56,189,248,0.2); margin: 30px 0;">
-               <p style="font-size: 11px; color: #475569;">
-                   &copy; 2025 MeshOps.AI — Secure AI Infrastructure
-               </p>
-           </div>
-       </body>
-       </html>
-       """;
+<!doctype html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <meta http-equiv="x-ua-compatible" content="ie=edge"/>
+    <meta charSet="utf-8"/>
+  </head>
+  <body style="margin:0;padding:0;background:#0A0A29;font-family:'Segoe UI',Arial,sans-serif;color:#F8FAFC;">
+    <div style="max-width:600px;margin:40px auto;padding:30px;background:rgba(10,10,41,0.92);border-radius:12px;box-shadow:0 0 25px rgba(212,175,55,0.25);text-align:center;">
+      
+      <h1 style="margin:0 0 10px;font-size:28px;font-weight:600;letter-spacing:2px;color:#D4AF37;">
+        MeshOps<span style="color:#B69121;">.AI</span>
+      </h1>
+
+      <p style="margin:10px 0 22px;font-size:15px;color:#E5E7EB;">
+        Your One-Time Password for verification is:
+      </p>
+
+      <!-- OTP chip: keep this block text-only; no extra spans/characters -->
+      <div style="
+        display:inline-block;
+        background:linear-gradient(90deg,#D4AF37,#B69121);
+        padding:16px 44px;
+        border-radius:10px;
+        box-shadow:0 0 20px rgba(212,175,55,0.45);
+        line-height:1;               /* prevent extra line */
+        mso-line-height-rule:exactly; /* Outlook */
+      ">
+        <span style="
+          display:block;
+          font-size:34px;
+          font-weight:800;
+          color:#0A0A29;
+          letter-spacing:2px;
+          font-variant-numeric:tabular-nums;
+        ">
+""" + otp + """
+        </span>
+      </div>
+
+      <p style="margin:24px 0 0;font-size:13px;color:#d1d5db;">
+        This OTP is valid for <strong>5 minutes</strong>. Do not share it with anyone.
+      </p>
+
+      <hr style="border:none;border-top:1px solid rgba(212,175,55,0.22);margin:28px 0"/>
+
+      <p style="margin:0;font-size:11px;color:#9CA3AF;">
+        &copy; 2025 MeshOps.AI — Secure AI Infrastructure
+      </p>
+    </div>
+  </body>
+</html>
+""";
+
 
         helper.setText(htmlContent, true);
 
