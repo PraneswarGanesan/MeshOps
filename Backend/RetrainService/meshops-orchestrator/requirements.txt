@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+boto3
+paramiko
+python-multipart
+pydantic
+pandas
+scikit-learn
+joblib

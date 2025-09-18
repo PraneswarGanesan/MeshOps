@@ -39,20 +39,21 @@ public class PlanService {
 
         String baseKey = S3KeyUtil.keyOf(project.getS3Prefix());
 
-        // Build context from selected files
+        // ---- DEFAULT FILE LIST if client didn't send any ----
+        List<String> files = (req.getFiles() == null || req.getFiles().isEmpty())
+                ? List.of("driver.py", "tests.yaml", "train.py", "predict.py", "dataset.csv",
+                "pre-processed/images/")   // folder hint is OK; we’ll just note it
+                : req.getFiles();
+
+        // ---- Build context from selected files (sampled/truncated safely) ----
         StringBuilder ctx = new StringBuilder();
         ctx.append("### User-selected project files (content included/truncated) ###\n");
-
-        List<String> files = req.getFiles();
-        if (files == null || files.isEmpty()) {
-            throw new IllegalArgumentException("files list is required");
-        }
 
         int maxCharsPerFile = 60_000;
         int csvMaxLines = 150;
 
         for (String rel : files) {
-            String key = S3KeyUtil.join(baseKey, rel);
+            String key = S3KeyUtil.join(baseKey, rel.replaceFirst("^/+", "")); // normalize
             if (!s3.exists(key)) {
                 ctx.append("\n[missing] ").append(rel).append("\n");
                 continue;
@@ -63,26 +64,30 @@ public class PlanService {
                         .append(text)
                         .append("\n===== END FILE: ").append(rel).append(" =====\n");
             } else {
-                ctx.append("\n[binary or large file omitted] ").append(rel).append("\n");
+                // For non-text (images etc.) just acknowledge presence
+                ctx.append("\n[binary or non-text content sampled/omitted] ").append(rel).append("\n");
             }
         }
 
-        // Call LLM → directly save driver/tests into S3
-        return llm.generateAndSaveToS3(req.getBrief(), ctx.toString(), baseKey)
-                .map(keys -> {
-                    // update project with new keys, mark NOT approved yet
-                    project.setDriverKey(keys.get("driverKey"));
-                    project.setTestsKey(keys.get("testsKey"));
-                    project.setApproved(false);
-                    projects.save(project);
+        // ---- Call LLM → directly save driver/tests into S3 ----
+        return llm.generateAndSaveToS3(
+                (req.getBrief() == null ? "" : req.getBrief()),
+                ctx.toString(),
+                baseKey
+        ).map(keys -> {
+            // update project with new keys, mark NOT approved yet
+            project.setDriverKey(keys.get("driverKey"));
+            project.setTestsKey(keys.get("testsKey"));
+            project.setApproved(false);
+            projects.save(project);
 
-                    return Map.of(
-                            "driverKey", keys.get("driverKey"),
-                            "testsKey", keys.get("testsKey"),
-                            "driverContent", s3.getStringSafe(keys.get("driverKey"), 100_000, 200),
-                            "testsContent", s3.getStringSafe(keys.get("testsKey"), 50_000, 200)
-                    );
-                });
+            return Map.of(
+                    "driverKey", keys.get("driverKey"),
+                    "testsKey", keys.get("testsKey"),
+                    "driverContent", s3.getStringSafe(keys.get("driverKey"), 100_000, 200),
+                    "testsContent", s3.getStringSafe(keys.get("testsKey"), 50_000, 200)
+            );
+        });
     }
 
     // ===================== EXISTING: Approve plan =====================

@@ -1,113 +1,57 @@
 // src/api/storage.js
-import axios from "axios";
+const BASE = "http://localhost:8081";
 
-const API = axios.create({
-  baseURL: "http://localhost:8081",
-  headers: { "Content-Type": "application/json" },
-});
-
-API.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
+async function ok(res, url) {
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    const err = new Error(`${res.status} ${res.statusText} @ ${url}\n${body}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return res;
+}
 
 export const StorageAPI = {
-  /* -------- Projects -------- */
-  createProject: (username, projectName) =>
-    API.post(
-      `/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}`
-    ),
-
-  listProjects: async (username) => {
-    const res = await API.get(
-      `/api/user-storage/${encodeURIComponent(username)}/projects`
-    );
-    return Array.isArray(res.data) ? res.data : [];
+  async listProjects(username) {
+    const url = `${BASE}/api/user-storage/${encodeURIComponent(username)}/projects`;
+    const res = await ok(await fetch(url), url);
+    return res.json(); // ["projectA","projectB"]
   },
 
-  deleteProject: (username, projectName) =>
-    API.delete(
-      `/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}`
-    ),
-
-  /* -------- Files / folders -------- */
-  listFiles: async (username, projectName, folder = "") => {
-    const res = await API.get(
-      `/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/files`,
-      { params: { folder: folder || undefined } }
+  async listFiles(username, projectName, folder = "") {
+    const u = new URL(
+      `${BASE}/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/files`
     );
-    return Array.isArray(res.data) ? res.data : [];
+    if (folder) u.searchParams.set("folder", folder);
+    const url = u.toString();
+    const res = await ok(await fetch(url), url);
+    return res.json(); // ["driver.py","tests.yaml","subdir/"]
   },
 
-  // Upload a binary file (multipart)
-  uploadFile: async (username, projectName, file, folder = "") => {
-    const form = new FormData();
-    form.append("file", file);
-    await API.post(
-      `/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/upload`,
-      form,
-      {
-        params: { folder: folder || undefined },
-        headers: { "Content-Type": "multipart/form-data" },
-      }
+  async fetchTextFile(username, projectName, fileName, folder = "") {
+    const u = new URL(
+      `${BASE}/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/download/${encodeURIComponent(fileName)}`
     );
+    if (folder) u.searchParams.set("folder", folder);
+    const url = u.toString();
+    const res = await ok(await fetch(url), url);
+    return res.text();
   },
 
-  // Download file as a browser download (blob -> save)
-  downloadFile: async (username, projectName, fileName, folder = "") => {
-    const res = await API.get(
-      `/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/download/${encodeURIComponent(fileName)}`,
-      { params: { folder: folder || undefined }, responseType: "blob" }
+  async uploadTextFile(username, projectName, fileName, content, folder = "", contentType = "text/plain") {
+    const u = new URL(
+      `${BASE}/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/upload`
     );
-    const url = URL.createObjectURL(res.data);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    URL.revokeObjectURL(url);
-  },
+    if (folder) u.searchParams.set("folder", folder);
+    const url = u.toString();
 
-  deleteFile: (username, projectName, fileName, folder = "") =>
-    API.delete(
-      `/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/delete/${encodeURIComponent(fileName)}`,
-      { params: { folder: folder || undefined } }
-    ),
-
-  /* -------- TEXT helpers used by BehaviourTest.jsx -------- */
-
-  // Fetch a file's content as TEXT (no download prompt)
-  fetchTextFile: async (username, projectName, fileName, folder = "") => {
-    const res = await API.get(
-      `/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/download/${encodeURIComponent(fileName)}`,
-      { params: { folder: folder || undefined }, responseType: "text" }
-    );
-    // axios with responseType:"text" puts the string in res.data
-    return typeof res.data === "string" ? res.data : String(res.data ?? "");
-  },
-
-  // Upload raw text by wrapping it into a Blob/File and reusing uploadFile (multipart)
-  uploadTextFile: async (
-    username,
-    projectName,
-    fileName,
-    content,
-    folder = "",
-    contentType = "text/plain"
-  ) => {
     const blob = new Blob([content], { type: contentType });
     const file = new File([blob], fileName, { type: contentType });
-    return await (async () => {
-      const form = new FormData();
-      form.append("file", file);
-      await API.post(
-        `/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}/upload`,
-        form,
-        {
-          params: { folder: folder || undefined },
-          headers: { "Content-Type": "multipart/form-data" },
-        }
-      );
-    })();
+    const form = new FormData();
+    form.append("file", file);
+
+    const res = await ok(await fetch(url, { method: "POST", body: form }), url);
+    try { return await res.json(); } catch { return true; }
   },
 };

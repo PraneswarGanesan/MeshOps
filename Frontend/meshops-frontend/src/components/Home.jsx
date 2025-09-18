@@ -88,7 +88,7 @@ export default function Home() {
           className="absolute inset-0"
           style={{
             background:
-              "linear-gradient(180deg, rgba(11,11,18,0.65), rgba(11,12,18,0.95))",
+              "linear-gradient(180deg, rgba(11,11,18,0.65), rgba(11,1,18,0.95))",
           }}
         />
         {/* Nav */}

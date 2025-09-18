@@ -1,3 +1,4 @@
+// src/main/java/com/mesh/behaviour/behaviour/service/LlmService.java
 package com.mesh.behaviour.behaviour.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -23,459 +24,806 @@ import java.util.regex.Pattern;
 public class LlmService {
 
     private final AppProperties props;
-    private final WebClient webClient = WebClient.builder().build();
     private final S3Service s3;
+    private final WebClient webClient = WebClient.builder().build();
+    private final ObjectMapper mapper = new ObjectMapper();
 
     @Value("${llm.gemini.apiKey}")
     private String apiKey;
-
     @Value("${llm.gemini.url}")
     private String url;
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    /* ===================== PUBLIC ===================== */
 
-    // ===================== driver.py + tests.yaml (existing flow) =====================
-
-    /**
-     * Generates driver.py + tests.yaml via LLM and writes directly to S3.
-     * Returns S3 keys map: {driverKey, testsKey}.
-     */
     public Mono<Map<String, String>> generateAndSaveToS3(String brief, String contextFromFiles, String s3Prefix) {
+        requireKeys();
+        String prompt = Prompt.driverAndTests(contextFromFiles, brief);
+        final String baseKey = normalizeBaseKey(s3Prefix);
+        return callGemini(prompt).map(resp -> parseAndSave(resp, baseKey));
+    }
+
+    public Map<String, String> generateTestsOnlyToS3(String brief, String contextFromFiles, String baseKey, String label) {
+        requireKeys();
+        String prompt = Prompt.testsOnly(contextFromFiles, brief);
+        String raw = callGemini(prompt).block();
+        String yaml = ensureHybridYaml(extractPlainText(raw));
+        String base = normalizeBaseKey(baseKey);
+        String versionKey = S3KeyUtil.join(S3KeyUtil.join(base, "tests"), "tests_" + label + ".yaml");
+        String canonicalKey = S3KeyUtil.join(base, "tests.yaml");
+        s3.putString(versionKey, yaml, "text/yaml");
+        return Map.of("versionKey", versionKey, "canonicalKey", canonicalKey);
+    }
+
+    public Map<String, String> generateRefinedTestsToS3(String strictBrief, String contextFromFiles, String baseKey, String label) {
+        String prompt = Prompt.refiner(contextFromFiles, strictBrief);
+        String raw = callGemini(prompt).block();
+        String yaml = ensureHybridYaml(extractPlainText(raw));
+        String base = normalizeBaseKey(baseKey);
+        String versionKey = S3KeyUtil.join(S3KeyUtil.join(base, "tests"), "tests_" + label + ".yaml");
+        String canonicalKey = S3KeyUtil.join(base, "tests.yaml");
+        s3.putString(versionKey, yaml, "text/yaml");
+        return Map.of("versionKey", versionKey, "canonicalKey", canonicalKey);
+    }
+
+    public Map<String, String> generateScenarioTestsToS3(String scenarioBrief, String contextFromFiles, String baseKey, String label) {
+        String prompt = Prompt.scenario(contextFromFiles, scenarioBrief);
+        String raw = callGemini(prompt).block();
+        String yaml = ensureHybridYaml(extractPlainText(raw));
+        String base = normalizeBaseKey(baseKey);
+        String versionKey = S3KeyUtil.join(S3KeyUtil.join(base, "tests"), "tests_" + label + ".yaml");
+        String canonicalKey = S3KeyUtil.join(base, "tests.yaml");
+        s3.putString(versionKey, yaml, "text/yaml");
+        return Map.of("versionKey", versionKey, "canonicalKey", canonicalKey);
+    }
+
+    /* ===================== HTTP + parsing ===================== */
+
+    private void requireKeys() {
         if (!StringUtils.hasText(apiKey) || !StringUtils.hasText(url)) {
             throw new IllegalStateException("Gemini API key/URL not configured");
         }
-        String prompt = String.format("""
-You are given a user's ML project. Below are REAL file contents selected by the user.
+    }
+
+    private Mono<String> callGemini(String prompt) {
+        String finalUrl = url + apiKey;
+        Map<String, Object> body = Map.of("contents", List.of(Map.of("parts", List.of(Map.of("text", prompt)))));
+        return webClient.post().uri(finalUrl).contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                .retrieve().bodyToMono(String.class);
+    }
+
+    private Map<String, String> parseAndSave(String geminiJson, String baseKey) {
+        String combined = extractAllTextFromGemini(geminiJson);
+
+        String driver = firstGroup("(?s)```(?:python|py)\\s+(.*?)\\s*```", combined);
+        String tests  = firstGroup("(?s)```(?:yaml|yml)\\s+(.*?)\\s*```",   combined);
+
+        if (!StringUtils.hasText(driver)) driver = firstGroup("(?s)```\\s*(.*?)\\s*```", combined);
+        if (!StringUtils.hasText(tests))  tests  = firstGroup("(?s)```\\s*(.*?)\\s*```", removeFirstFencedBlock(combined));
+
+        if (!StringUtils.hasText(driver) || !StringUtils.hasText(tests)) {
+            int idx = indexOfYamlStart(combined);
+            if (!StringUtils.hasText(driver) && idx > 0) driver = combined.substring(0, idx);
+            if (!StringUtils.hasText(tests)  && idx > 0) tests  = combined.substring(idx);
+        }
+
+        driver = clean(driver);
+        tests  = ensureHybridYaml(clean(tests));
+
+        String[] fixed = validateOrFallback(driver, tests);
+        driver = fixed[0];
+        tests  = fixed[1];
+
+        String driverKey = S3KeyUtil.join(baseKey, "driver.py");
+        String testsKey  = S3KeyUtil.join(baseKey, "tests.yaml");
+
+        s3.putString(driverKey, driver, "text/x-python");
+        s3.putString(testsKey,  tests,  "text/yaml");
+        return Map.of("driverKey", driverKey, "testsKey", testsKey);
+    }
+
+    /* ===================== helpers ===================== */
+
+    private String normalizeBaseKey(String s3PrefixOrKey) {
+        if (!StringUtils.hasText(s3PrefixOrKey)) throw new IllegalArgumentException("Missing s3Prefix");
+        try {
+            if (s3PrefixOrKey.startsWith("s3://")) return S3KeyUtil.keyOf(s3PrefixOrKey);
+            return s3PrefixOrKey;
+        } catch (Exception e) {
+            return s3PrefixOrKey;
+        }
+    }
+
+    private String ensureHybridYaml(String yamlIn) {
+        String yaml = (yamlIn == null ? "" : yamlIn).trim();
+        boolean hasTests      = Pattern.compile("(?m)^\\s*tests\\s*:",      Pattern.CASE_INSENSITIVE).matcher(yaml).find();
+        boolean hasScenarios  = Pattern.compile("(?m)^\\s*scenarios\\s*:",  Pattern.CASE_INSENSITIVE).matcher(yaml).find();
+        boolean hasGenerators = Pattern.compile("(?m)^\\s*generators\\s*:", Pattern.CASE_INSENSITIVE).matcher(yaml).find();
+        boolean hasPolicies   = Pattern.compile("(?m)^\\s*policies\\s*:",   Pattern.CASE_INSENSITIVE).matcher(yaml).find();
+
+        if (!hasTests && !hasScenarios && !hasGenerators && !hasPolicies) {
+            return DEFAULT_HYBRID_YAML;
+        }
+        if (!hasTests)      yaml = DEFAULT_TESTS + "\n" + yaml;
+        if (!hasScenarios)  yaml = yaml + "\n\n" + DEFAULT_SCENARIOS;
+        if (!hasGenerators) yaml = yaml + "\n\n" + DEFAULT_GENERATORS;
+        if (!hasPolicies)   yaml = yaml + "\n\n" + DEFAULT_POLICIES;
+        return yaml;
+    }
+
+    private static final String DEFAULT_TESTS = """
+tests:
+  - name: "Main run"
+    run: "python driver.py --base_dir=<dir>"
+    assert_stdout_contains:
+      - "Model trained and saved to"
+      - "Predictions generated."
+      - "Evaluation metrics:"
+    assert_file_exists:
+      - "<dir>/model.pkl"
+      - "<dir>/tests.csv"
+""";
+
+    private static final String DEFAULT_SCENARIOS = """
+scenarios:
+  - name: "Typical positive"
+    category: "Scenario"
+    severity: "high"
+    input: {}
+    expected: { kind: "classification", label: 1 }
+  - name: "Typical negative"
+    category: "Scenario"
+    severity: "high"
+    input: {}
+    expected: { kind: "classification", label: 0 }
+""";
+
+    private static final String DEFAULT_GENERATORS = """
+generators:
+  - name: "Boundary amounts"
+    mode: "grid"
+    input:
+      amount: [0, 1, 10, 10000]
+      is_international: [0, 1]
+    expected: { kind: "classification" }
+""";
+
+    private static final String DEFAULT_POLICIES = """
+policies:
+  majority_baseline_margin: 0.02
+  binary_avg: "binary"
+  multiclass_avg: "weighted"
+  zero_division: 0
+  regression_tolerance_factor: 2.0
+  require_confusion_matrix: true
+""";
+
+    private static final String DEFAULT_HYBRID_YAML = String.join("\n\n",
+            DEFAULT_TESTS, DEFAULT_SCENARIOS, DEFAULT_GENERATORS, DEFAULT_POLICIES);
+
+    private String extractAllTextFromGemini(String geminiJson) {
+        try {
+            JsonNode root = mapper.readTree(geminiJson);
+            StringBuilder sb = new StringBuilder();
+            var candidates = root.get("candidates");
+            if (candidates != null && candidates.isArray()) {
+                for (JsonNode c : candidates) {
+                    var parts = c.path("content").path("parts");
+                    if (parts != null && parts.isArray()) {
+                        for (JsonNode p : parts) {
+                            String t = p.path("text").asText("");
+                            if (StringUtils.hasText(t)) {
+                                if (sb.length() > 0) sb.append("\n");
+                                sb.append(t);
+                            }
+                        }
+                    }
+                }
+            }
+            if (sb.length() == 0) {
+                String t = root.path("text").asText("");
+                if (StringUtils.hasText(t)) sb.append(t);
+            }
+            return norm(sb.toString());
+        } catch (Exception e) {
+            return norm(geminiJson);
+        }
+    }
+
+    private String extractPlainText(String geminiJson) {
+        try {
+            JsonNode root = mapper.readTree(geminiJson);
+            StringBuilder sb = new StringBuilder();
+            var candidates = root.get("candidates");
+            if (candidates != null && candidates.isArray()) {
+                for (JsonNode c : candidates) {
+                    var parts = c.path("content").path("parts");
+                    if (parts != null && parts.isArray()) {
+                        for (JsonNode p : parts) {
+                            String t = p.path("text").asText("");
+                            if (StringUtils.hasText(t)) {
+                                if (sb.length() > 0) sb.append("\n");
+                                sb.append(t);
+                            }
+                        }
+                    }
+                }
+            }
+            if (sb.length() == 0) {
+                String t = root.path("text").asText("");
+                if (StringUtils.hasText(t)) sb.append(t);
+            }
+            String out = norm(sb.toString()).replaceAll("(?s)```+.*?```+", "");
+            return out.trim();
+        } catch (Exception e) {
+            return norm(geminiJson).replaceAll("(?s)```+.*?```+", "").trim();
+        }
+    }
+
+    private String firstGroup(String regex, String src) {
+        if (!StringUtils.hasText(src)) return "";
+        Matcher m = Pattern.compile(regex).matcher(src);
+        return m.find() ? m.group(1) : "";
+    }
+
+    private String removeFirstFencedBlock(String src) {
+        if (!StringUtils.hasText(src)) return "";
+        Matcher m = Pattern.compile("(?s)```.*?```").matcher(src);
+        return m.find() ? src.substring(0, m.start()) + src.substring(m.end()) : src;
+    }
+
+    private int indexOfYamlStart(String s) {
+        if (!StringUtils.hasText(s)) return -1;
+        int i = s.toLowerCase().indexOf("```yaml");
+        if (i >= 0) return i;
+        Matcher m = Pattern.compile("(?m)^\\s*tests\\s*:").matcher(s);
+        return m.find() ? m.start() : -1;
+    }
+
+    private String clean(String block) {
+        if (!StringUtils.hasText(block)) return "";
+        String s = block.replaceAll("(?s)^\\s*```(?:[a-zA-Z]+)?\\s*", "").replaceAll("(?s)\\s*```\\s*$", "");
+        if (!s.isEmpty() && s.charAt(0) == '\uFEFF') s = s.substring(1);
+        s = norm(s).trim();
+        if (s.startsWith("\\n")) s = s.replaceFirst("^\\\\n+", "");
+        return new String(s.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
+    }
+
+    private String norm(String s) {
+        return s == null ? "" : s.replace("\r\n", "\n").replace("\r", "\n");
+    }
+
+    /* ===================== VALIDATOR + SAFE FALLBACK ===================== */
+
+    private String[] validateOrFallback(String driver, String yaml) {
+        boolean ok =
+                StringUtils.hasText(driver) &&
+                        driver.contains("--base_dir") &&
+                        driver.contains("dataset.csv") &&
+                        driver.contains("tests.yaml") &&
+                        driver.contains("tests.csv") &&
+                        driver.toLowerCase().contains("scenarios") &&
+                        !looksLikeMetricsCSV(driver) &&                   // <-- reject metrics writers
+                        testsCsvHasExpectedPredicted(driver) &&           // <-- require expected+predicted in CSV
+                        !testsCsvMentionsForbiddenValueColumn(driver) &&  // <-- forbid 'value' column in CSV
+                        StringUtils.hasText(yaml) &&
+                        Pattern.compile("(?m)^\\s*tests\\s*:", Pattern.CASE_INSENSITIVE).matcher(yaml).find() &&
+                        Pattern.compile("(?m)^\\s*scenarios\\s*:", Pattern.CASE_INSENSITIVE).matcher(yaml).find() &&
+                        yaml.toLowerCase().contains("run: \"python driver.py --base_dir=<dir>\"");
+
+        if (ok) return new String[]{driver, yaml};
+        return new String[]{SAFE_FALLBACK_DRIVER, SAFE_FALLBACK_YAML};
+    }
+
+
+    /**
+     * Heuristics to detect drivers that dump accuracy/precision/recall/f1 rows into tests.csv.
+     * We look for a to_csv("tests.csv") call near metric keys or a DataFrame built from metrics.
+     */
+    private boolean looksLikeMetricsCSV(String driver) {
+        if (!StringUtils.hasText(driver)) return true;
+        String d = driver.replace("\n", " ").toLowerCase();
+
+        // any to_csv(...tests.csv...) with metric words nearby → reject
+        Matcher m = Pattern.compile("to_csv\\s*\\([^)]*tests\\.csv[^)]*\\)").matcher(d);
+        while (m.find()) {
+            int start = Math.max(0, m.start() - 400);
+            int end   = Math.min(d.length(), m.end() + 400);
+            String ctx = d.substring(start, end);
+            if (ctx.contains("accuracy") || ctx.contains("precision") || ctx.contains("recall") || ctx.contains("f1")
+                    || ctx.contains("mae") || ctx.contains("rmse") || ctx.contains("silhouette") || ctx.contains("inertia")) {
+                return true;
+            }
+            // classic metrics table columns
+            if (ctx.contains("['name','category','severity','result','value','threshold','metric'")
+                    || ctx.contains("\"value\"") && ctx.contains("\"metric\"")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean testsCsvHasExpectedPredicted(String driver) {
+        if (!StringUtils.hasText(driver)) return false;
+        String d = driver.replace("\n", " ").toLowerCase();
+
+        // require 'expected' and 'predicted' to appear in the dict used to build rows or column list
+        boolean mentionsExpected = d.contains("'expected'") || d.contains("\"expected\"");
+        boolean mentionsPredicted = d.contains("'predicted'") || d.contains("\"predicted\"");
+
+        // and ensure the same write goes to tests.csv
+        boolean writesTestsCsv = d.contains("to_csv") && d.contains("tests.csv");
+        return writesTestsCsv && mentionsExpected && mentionsPredicted;
+    }
+
+    private boolean testsCsvMentionsForbiddenValueColumn(String driver) {
+        if (!StringUtils.hasText(driver)) return false;
+        String d = driver.replace("\n", " ").toLowerCase();
+        // If they explicitly include a 'value' column in the row/columns for tests.csv → forbid
+        if (d.contains("'value'") || d.contains("\"value\"")) {
+            // but tolerate 'value' only if it's part of YAML read, not the CSV row
+            // Heuristic: if near to_csv("tests.csv") we see 'value', it's forbidden
+            Matcher m = Pattern.compile("to_csv\\s*\\([^)]*tests\\.csv[^)]*\\)").matcher(d);
+            while (m.find()) {
+                int start = Math.max(0, m.start() - 400);
+                int end   = Math.min(d.length(), m.end() + 400);
+                String ctx = d.substring(start, end);
+                if (ctx.contains("'value'") || ctx.contains("\"value\"")) return true;
+            }
+        }
+        return false;
+    }
+
+    /* ===================== SAFE FALLBACK DRIVER (behaviour-first) ===================== */
+    private static final String SAFE_FALLBACK_DRIVER = """
+import os, sys, json, yaml, pandas as pd, numpy as np
+import matplotlib.pyplot as plt
+from joblib import dump
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.cluster import KMeans
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, mean_absolute_error, mean_squared_error,
+    silhouette_score
+)
+from sklearn.model_selection import train_test_split
+
+def coerce_boolish_to_numeric(series):
+    if series.dtype.kind in "biufc":
+        return series
+    mapping = {"true":1, "false":0, "True":1, "False":0}
+    return series.map(lambda v: mapping.get(str(v), v))
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] != "--base_dir":
+        print("Usage: python driver.py --base_dir <base_directory>")
+        sys.exit(1)
+    base_dir = sys.argv[2]
+
+    ds = os.path.join(base_dir, "dataset.csv")
+    if not os.path.exists(ds):
+        print("dataset.csv not found in base_dir")
+        sys.exit(1)
+    df = pd.read_csv(ds)
+
+    ty = os.path.join(base_dir, "tests.yaml")
+    tests = {"scenarios": []}
+    if os.path.exists(ty):
+        with open(ty) as f:
+            tests = yaml.safe_load(f) or {"scenarios": []}
+
+    # target detection
+    target_col = None
+    if "target" in df.columns: target_col = "target"
+    elif "is_fraud" in df.columns: target_col = "is_fraud"
+    else:
+        last = df.columns[-1]
+        if not (str(last).lower().endswith("id") or str(last).lower() == "index"):
+            target_col = last
+
+    # task detection
+    if target_col is None:
+        task = "unsupervised"; X = df.copy(); y = None
+    else:
+        y = df[target_col]; X = df.drop(columns=[target_col])
+        for c in X.columns:
+            if not pd.api.types.is_numeric_dtype(X[c]):
+                X[c] = X[c].map(lambda v: 1 if str(v).lower()=="true" else (0 if str(v).lower()=="false" else v))
+        if (not pd.api.types.is_numeric_dtype(y)) or y.nunique() <= 10:
+            task = "classification"
+        else:
+            task = "regression"
+
+    # train
+    if task == "classification":
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y if y.nunique()>1 else None
+        )
+        try:
+            model = LogisticRegression(max_iter=2000, random_state=42).fit(X_train, y_train)
+        except Exception:
+            model = RandomForestClassifier(n_estimators=100, random_state=42).fit(X_train, y_train)
+    elif task == "regression":
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        model = LinearRegression().fit(X_train, y_train)
+    else:
+        model = KMeans(n_clusters=3, random_state=42).fit(X)
+        X_test, y_test = X, None
+
+    mpath = os.path.join(base_dir, "model.pkl")
+    dump(model, mpath)
+    print(f"Model trained and saved to {mpath}")
+
+    metrics = {}
+    if task == "classification":
+        preds_test = model.predict(X_test)
+        avg = "binary" if set(y.unique())=={0,1} else "weighted"
+        acc = accuracy_score(y_test, preds_test)
+        prec = precision_score(y_test, preds_test, average=avg, zero_division=0)
+        rec  = recall_score(y_test, preds_test, average=avg, zero_division=0)
+        f1   = f1_score(y_test, preds_test, average=avg, zero_division=0)
+        print("Predictions generated.")
+        print("Evaluation metrics:")
+        print(f"Accuracy: {acc:.4f}")
+        print(f"Precision: {prec:.4f}")
+        print(f"Recall: {rec:.4f}")
+        print(f"F1-score: {f1:.4f}")
+        metrics = {"accuracy":acc,"precision":prec,"recall":rec,"f1":f1}
+        if len(set(y_test)) > 1:
+            cm = confusion_matrix(y_test, preds_test)
+            plt.figure()
+            plt.imshow(cm)
+            plt.title("Confusion Matrix"); plt.xlabel("Predicted"); plt.ylabel("True"); plt.colorbar()
+            plt.savefig(os.path.join(base_dir,"confusion_matrix.png")); plt.close()
+    elif task == "regression":
+        preds_test = model.predict(X_test)
+        from math import sqrt
+        mae = mean_absolute_error(y_test, preds_test)
+        rmse = mean_squared_error(y_test, preds_test, squared=False)
+        print("Predictions generated."); print("Evaluation metrics:")
+        print(f"MAE: {mae:.4f}"); print(f"RMSE: {rmse:.4f}")
+        metrics = {"mae":mae,"rmse":rmse}
+    else:
+        preds_all = model.predict(X)
+        try:
+            sil = silhouette_score(X, preds_all)
+        except Exception:
+            sil = 0.0
+        inertia = float(getattr(model, "inertia_", 0.0))
+        print("Predictions generated."); print("Evaluation metrics:")
+        print(f"Silhouette: {sil:.4f}"); print(f"Inertia: {inertia:.4f}")
+        metrics = {"silhouette":sil,"inertia":inertia}
+
+    with open(os.path.join(base_dir,"metrics.json"),"w") as f:
+        json.dump(metrics,f)
+
+    # scenarios => tests.csv (behaviour-first only)
+    rows = []
+    scenarios = tests.get("scenarios", []) or []
+    feature_cols = list(X.columns) if target_col is not None else list(df.columns)
+
+    if not scenarios:
+        # prevent empty file
+        fallback = {}
+        for c in feature_cols:
+            if pd.api.types.is_numeric_dtype(df[c]):
+                fallback[c] = float(df[c].median())
+            else:
+                mode = df[c].mode(); fallback[c] = mode.iloc[0] if not mode.empty else ""
+        pred = model.predict(pd.DataFrame([fallback])[feature_cols])[0] if hasattr(model,"predict") else ""
+        rows.append({"name":"No scenarios","category":"Scenario","severity":"low","metric":"prediction",
+                     "threshold":"","expected":"N/A","predicted":pred,"result":"N/A", **fallback})
+    else:
+        base_tol = 2*metrics.get("mae", 0.0) if "mae" in metrics else 0.0
+        for sc in scenarios:
+            inp = dict(sc.get("input", {}))
+            for k,v in list(inp.items()):
+                if isinstance(v,str) and v.lower() in ("true","false"):
+                    inp[k] = 1 if v.lower()=="true" else 0
+            row_df = pd.DataFrame([inp])
+            for c in feature_cols:
+                if c not in row_df.columns:
+                    if pd.api.types.is_numeric_dtype(df[c]):
+                        row_df[c] = float(df[c].median())
+                    else:
+                        mode = df[c].mode(); row_df[c] = mode.iloc[0] if not mode.empty else ""
+                else:
+                    if pd.api.types.is_numeric_dtype(df[c]):
+                        row_df[c] = pd.to_numeric(row_df[c], errors="coerce").fillna(float(df[c].median()))
+            row_df = row_df[feature_cols]
+            pred = model.predict(row_df)[0] if hasattr(model,"predict") else ""
+            exp = sc.get("expected", {}) or {}
+            result="N/A"; metric_name="prediction"; thr=""
+            if exp.get("kind")=="classification":
+                result = "PASS" if pred == exp.get("label") else "FAIL"
+            elif exp.get("kind")=="regression":
+                val = float(exp.get("value",0.0)); tol = float(exp.get("tolerance", base_tol)); thr = tol
+                result = "PASS" if abs(float(pred)-val) <= tol else "FAIL"
+            elif exp.get("kind")=="unsupervised":
+                if "cluster" in exp: result = "PASS" if pred == exp.get("cluster") else "FAIL"
+                else: result = "N/A"
+            row = {"name": sc.get("name","Scenario"), "category": sc.get("category","Scenario"),
+                   "severity": sc.get("severity","medium"), "metric": metric_name, "threshold": thr,
+                   "expected": exp.get("label", exp.get("value", exp.get("cluster","N/A"))),
+                   "predicted": pred, "result": result}
+            row.update(sc.get("input", {})); rows.append(row)
+
+    pd.DataFrame(rows).to_csv(os.path.join(base_dir,"tests.csv"), index=False)
+
+if __name__ == "__main__":
+    main()
+""";
+
+    private static final String SAFE_FALLBACK_YAML = """
+tests:
+  - name: "Main run"
+    run: "python driver.py --base_dir=<dir>"
+    assert_stdout_contains:
+      - "Model trained and saved to"
+      - "Predictions generated."
+      - "Evaluation metrics:"
+    assert_file_exists:
+      - "<dir>/model.pkl"
+      - "<dir>/tests.csv"
+scenarios:
+  - name: "Typical positive"
+    category: "Scenario"
+    severity: "high"
+    input: { amount: 500, duration: 60, age: 30, is_international: 0 }
+    expected: { kind: "classification", label: 0 }
+  - name: "Suspicious large international"
+    category: "Scenario"
+    severity: "high"
+    input: { amount: 5000, duration: 30, age: 22, is_international: 1 }
+    expected: { kind: "classification", label: 1 }
+generators:
+  - name: "Boundary grid"
+    mode: "grid"
+    input:
+      amount: [0, 1, 100, 5000]
+      duration: [1, 60, 600]
+      is_international: [0, 1]
+    expected: { kind: "classification" }
+policies:
+  majority_baseline_margin: 0.02
+  binary_avg: "binary"
+  multiclass_avg: "weighted"
+  zero_division: 0
+  regression_tolerance_factor: 2.0
+  require_confusion_matrix: true
+""";
+
+    /* ===================== PROMPTS (behaviour-first; escaped %) ===================== */
+    private static final class Prompt {
+
+        /** Generate BOTH driver.py and tests.yaml (hybrid). */
+        static String driverAndTests(String ctx, String brief) {
+            String tpl = """
+You are generating a BEHAVIOUR-TESTING kit for a user's ML project.
+Return exactly TWO fenced blocks in this order:
+1) ```python ...```   (driver.py)
+2) ```yaml ...```     (tests.yaml)
 
 ========= BEGIN USER FILES =========
 %s
 ========= END USER FILES =========
 
-TASKS (DO ALL):
+HARD REQUIREMENTS (NO EXCEPTIONS)
 
-(A) Generate a complete `driver.py` that defines:
-      def run_predictions(base_dir) -> (y_true, y_pred, labels)
-  OR provides a CLI entrypoint:
-      python driver.py --base_dir=<dir>
+DRIVER.PY (Ubuntu/Python3 + scikit-learn + numpy + pandas + matplotlib + pyyaml + joblib only):
+- CLI: require `--base_dir`. Use `os.path.join(base_dir, ...)` for all files.
+- Load dataset ONLY from: `pd.read_csv(os.path.join(base_dir, "dataset.csv"))`.
+  If missing: `print("dataset.csv not found in base_dir")` and `sys.exit(1)`.
+- Load tests ONLY from: `with open(os.path.join(base_dir, "tests.yaml")) as f: tests = yaml.safe_load(f) or {}`.
+- Detect target column (strict priority):
+    1) "target" if present
+    2) "is_fraud" if present
+    3) else use the **last column unless** it is ID-like (endswith "id" or equals "index", case-insensitive).
+- Task detection:
+    * if `target_col is None` → UNSUPERVISED
+    * else if target is non-numeric OR numeric with ≤10 unique values → CLASSIFICATION
+    * else → REGRESSION
+- Models (deterministic where applicable):
+    * classification: try `LogisticRegression(max_iter=2000, random_state=42)`, else `RandomForestClassifier(n_estimators=100, random_state=42)`
+    * regression: `LinearRegression()`
+    * unsupervised: `KMeans(n_clusters=3, random_state=42)`
+- Train and save model with joblib to `<base_dir>/model.pkl` and print EXACTLY:
+    `Model trained and saved to <full_path>`
+- Print minimal stdout:
+    "Predictions generated."
+    "Evaluation metrics:"
+    then ONE set of metrics for the detected task.
+- **BEHAVIOUR-FIRST OUTPUT (MUST)**:
+    * Write `<base_dir>/tests.csv` with **one row per scenario from tests.yaml**.
+    * Columns (exact): `name,category,severity,metric,threshold,expected,predicted,result` plus **all input feature columns**.
+    * **DO NOT** include dataset/global metric rows (accuracy/precision/recall/f1/mae/rmse/silhouette/inertia) in `tests.csv`.
+      These must go **only** to `<base_dir>/metrics.json`.
+    * `tests.csv` **must contain the headers** `expected` and `predicted` and **must NOT** contain a column named `value`.
 
-HARD REQUIREMENTS (follow exactly):
+- Column alignment for scenarios:
+    * Build a one-row DataFrame from `scenario.input`.
+    * Align to `X.columns`: fill missing numeric with dataset median; missing categorical with mode; drop extras;
+      coerce bool-like strings "true"/"false" to 1/0 for numeric fields.
+    * `pred = model.predict(row_df)[0]`
+    * PASS/FAIL rules:
+        - classification: PASS if `pred == expected.label`
+        - regression: use tolerance = `expected.tolerance` if provided else `2*MAE` (or 0 if MAE unavailable)
+                     PASS if `abs(pred - expected.value) <= tolerance`
+        - unsupervised: if `expected.cluster` provided, PASS if `pred == expected.cluster`, else result="N/A"
+- For classification with ≥2 labels in held-out test split, save `<base_dir>/confusion_matrix.png`.
+- NEVER invent other filenames; always use `dataset.csv` and `tests.yaml` under `base_dir`.
+- OPTIONAL modalities only if `dataset.csv` is missing:
+    * images/: Pillow → flatten → KMeans(3)
+    * texts/: TfidfVectorizer → KMeans(3)
 
-DATA LOADING & SPLIT
-- Load the dataset INSIDE driver.py using:
-    data_path = os.path.join(base_dir, "dataset.csv")
-    data = pd.read_csv(data_path)
-- Detect the label column robustly and return the **actual dataset column name** (correct case):
-    * Try, case-insensitive, in order: ["is_fraud","label","target","class","species","y"].
-    * If none match, use the LAST column as the label.
-    * Implementation MUST be safe:
-        lower_map = {c.lower(): c for c in data.columns}
-        for lbl in potential_labels:
-            if lbl in lower_map: return lower_map[lbl]
-        return data.columns[-1]
-    * Never use boolean array indexing like data.columns[[...]][0].
-- Features = all remaining columns after removing the label.
-- Perform train/test split on EVERY run so X_test and y_test ALWAYS exist:
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.30, random_state=42)
+TESTS.YAML (must drive the runner and scenario rows):
+- Start with:
+  tests:
+    - name: "Main run"
+      run: "python driver.py --base_dir=<dir>"
+      assert_stdout_contains:
+        - "Model trained and saved to"
+        - "Predictions generated."
+        - "Evaluation metrics:"
+      assert_file_exists:
+        - "<dir>/model.pkl"
+        - "<dir>/tests.csv"
+        # Include ONLY when classification with ≥2 labels is likely:
+        # - "<dir>/confusion_matrix.png"
 
-MODEL SAVE/LOAD & REQUIRED CONSOLE LINES
-- Save model at <base_dir>/model.pkl. If it exists, load it; else train and save it.
-- IMPORTANT: Print the SAME line in BOTH cases so automated checks pass:
-      print(f"Model trained and saved to: {model_path}")
-  (If loading, still print this exact line with the existing path.)
-- After predicting, print EXACTLY these lines (one per metric):
-      "Predictions generated."
-      "Evaluation metrics:"
-      "Accuracy: <float with 4 decimals>"          (classification only)
-      "Precision: <float with 4 decimals>"         (classification only)
-      "Recall: <float with 4 decimals>"            (classification only)
-      "F1-score: <float with 4 decimals>"          (classification only)
-      "MAE: <float with 4 decimals>"               (regression only)
-      "RMSE: <float with 4 decimals>"              (regression only)
-  Use sklearn metrics with zero_division=0 for classification.
+- Then provide:
+  scenarios:
+    # Fraud example columns: amount (float), duration (int), age (int), is_international (0/1)
+    - name: "Typical legit"
+      category: "Scenario"
+      severity: "low"
+      input: {amount: 120.0, duration: 10, age: 28, is_international: 0}
+      expected: {kind: "classification", label: 0}
+    - name: "Likely fraud"
+      category: "Scenario"
+      severity: "high"
+      input: {amount: 1800.0, duration: 200, age: 46, is_international: 1}
+      expected: {kind: "classification", label: 1}
 
-TASK TYPE DETECTION
-- Determine task type:
-    * If the label is numeric and number of unique values > 10 -> REGRESSION.
-    * Otherwise -> CLASSIFICATION.
+- Always include:
+  generators:
+    - name: "Boundary grid"
+      mode: "grid"
+      input:
+        amount: [0, 1, 100, 5000]
+        duration: [1, 60, 600]
+        is_international: [0, 1]
+      expected: {kind: "classification"}
+  policies:
+    majority_baseline_margin: 0.02
+    binary_avg: "binary"
+    multiclass_avg: "weighted"
+    zero_division: 0
+    regression_tolerance_factor: 2.0
+    require_confusion_matrix: true
 
-CLASSIFICATION METRICS (BINARY & MULTICLASS SAFE)
-- Compute y_pred = model.predict(X_test).
-- For precision/recall/f1, choose averaging safely:
-    classes = pd.unique(y_test); is_binary = len(classes) == 2
-    is_numeric = pd.api.types.is_numeric_dtype(y_test)
-    if (is_binary AND is_numeric AND set(pd.unique(y_test)) == {0,1}): average="binary"
-    else: average="weighted"
-- Pass this 'average' to precision_score/recall_score/f1_score and print 4 decimals.
+CONSTRAINTS
+- random_state=42 where applicable.
+- Use stdlib + scikit-learn + numpy + pandas + matplotlib + pyyaml + joblib (+ pillow/tfidfvectorizer only if dataset missing).
+- Do NOT import user modules with side effects.
 
-CONFUSION MATRIX (MUST SHOW NUMBERS)
-- If more than 1 unique label, create and save <base_dir>/confusion_matrix.png using matplotlib.
-- Use the union of classes in y_test and y_pred for ticks:
-    label_list = sorted(set(pd.unique(y_test)) | set(pd.unique(y_pred)))
-    cm = confusion_matrix(y_test, y_pred, labels=label_list)
-- Use label_list for BOTH xticklabels and yticklabels (same order).
-- Annotate each cell with its **count** using:
-    ax.text(j, i, str(cm[i, j]), ha="center", va="center", ...)
-- Call plt.tight_layout() before savefig. No GUI backends.
-
-REGRESSION METRICS
-- Compute y_pred = model.predict(X_test).
-- Compute and print:
-    MAE (mean absolute error) and RMSE (root mean squared error) with 4 decimals.
-
-TESTS.CSV (LEETCODE-STYLE, ALWAYS WRITE)
-- After predictions, ALWAYS create <base_dir>/tests.csv with **one row per test sample**.
-- The file MUST include ALL feature columns from X_test (dynamic), plus these columns:
-    name       = "transaction_<i>"   (1-based index)
-    category   = "Logic"
-    expected   = true label for the row
-    predicted  = predicted label/value for the row
-    result     = "PASS" if predicted == expected (classification) OR abs_error <= threshold (regression) else "FAIL"
-    severity   = "medium" if result == "PASS" else "high"
-    value      = for binary fraud-like labels (label name contains "fraud" and classes are exactly {0,1}):
-                   "Fraud 🚨" if predicted==1 else "Legit ✅"
-                 else (classification):
-                   f"{predicted} ✅" if PASS else f"{predicted} ❌"
-                 for regression:
-                   the predicted numeric value
-    threshold  = for classification: "-" ;
-                 for regression: numeric threshold used for PASS/FAIL (see below)
-    metric     = "prediction"
-- Regression PASS/FAIL rule:
-    * Compute MAE on the test set: mae = mean_absolute_error(y_test, y_pred)
-    * Set threshold = 2 * mae
-    * result = PASS if abs(predicted - expected) <= threshold else FAIL
-- To avoid row misalignment, reset indices before concatenation:
-    X_test_out = X_test.reset_index(drop=True)
-    tests_out  = tests_df.reset_index(drop=True)
-    final_df   = pd.concat([X_test_out, tests_out], axis=1)
-    final_df.to_csv(os.path.join(base_dir,"tests.csv"), index=False)
-- Ensure this file is always written, even if model is loaded.
-
-SAFETY & IMPORTS
-- DO NOT trust user train.py/predict.py (they may run code at import). Prefer not importing them.
-- If you choose to use them, only load specific functions via importlib and NEVER rely on top-level side effects.
-- The driver must work even if those files are missing or unsafe.
-- Keep everything self-contained and runnable on Ubuntu + Python3.
-- Do NOT install packages (the environment handles requirements separately).
-
-(B) Generate `tests.yaml` with a list of behaviour tests.
-- Include a main test that:
-    * runs: `python driver.py --base_dir=<dir>`
-    * checks output contains (depending on task type):
-        "Model trained and saved to", "Predictions generated.",
-        For classification: "Accuracy:", "Precision:", "Recall:", "F1-score:"
-        For regression:     "MAE:", "RMSE:"
-    * asserts files exist:
-        <dir>/model.pkl
-        (if classification) <dir>/confusion_matrix.png
-        <dir>/tests.csv
-- Include a robustness test that makes the dataset single-class (classification) or constant (regression)
-  and verifies no "Exception" appears (classification must still print metrics with zero_division=0).
-
-OUTPUT FORMAT STRICT:
-  1) First fenced block: ```python ...``` containing ONLY driver.py
-  2) Second fenced block: ```yaml ...``` containing ONLY tests.yaml
-
-NOTES:
-- Never rely on top-level execution in user files.
-- Ensure X_test/y_test exist before writing tests.csv.
-- Print the exact required lines so downstream scrapers succeed.
-
-Project brief (user message):
+USER BRIEF:
 %s
-""", contextFromFiles, brief);
-
-
-
-
-        Map<String, Object> body = Map.of(
-                "contents", List.of(
-                        Map.of("parts", List.of(
-                                Map.of("text", prompt)
-                        ))
-                )
-        );
-
-        String finalUrl = url + apiKey;
-
-        return webClient.post()
-                .uri(finalUrl)
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
-                .retrieve()
-                .bodyToMono(String.class)
-                .map(resp -> parseAndSave(resp, s3Prefix));
-    }
-
-    // ===================== NEW: tests-only generator (versioned) =====================
-
-    /**
-     * Generate only a tests.yaml (plain YAML text) and save it as:
-     *   <baseKey>/tests/tests_<label>.yaml
-     * Returns: { "versionKey": ..., "canonicalKey": ... }
-     * (Caller may choose to "activate" by copying versionKey → canonicalKey.)
-     */
-    public Map<String, String> generateTestsOnlyToS3(String brief,
-                                                     String contextFromFiles,
-                                                     String baseKey,
-                                                     String label) {
-        if (!StringUtils.hasText(apiKey) || !StringUtils.hasText(url)) {
-            throw new IllegalStateException("Gemini API key/URL not configured");
+""";
+            tpl = tpl.replace("%%", "%%%%");
+            tpl = tpl.replace("%", "%%");
+            return String.format(tpl, ctx, brief);
         }
 
-        String prompt = String.format("""
-            You are given a user's ML project files:
+        static String testsOnly(String ctx, String brief) {
+            String tpl = """
+Return ONLY YAML (no code fences).
+It MUST include these sections in this order:
+- tests:
+- scenarios:
+- generators:
+- policies:
 
-            ========= BEGIN USER FILES =========
-            %s
-            ========= END USER FILES =========
+STRICT RULES:
+- tests[0].run MUST be: "python driver.py --base_dir=<dir>"
+- assert_stdout_contains MUST include:
+    - "Model trained and saved to"
+    - "Predictions generated."
+    - "Evaluation metrics:"
+- assert_file_exists MUST include "<dir>/model.pkl" and "<dir>/tests.csv"
 
-            TASK: Produce ONLY a YAML test plan (no markdown code fences) that starts with:
-              tests:
-            Requirements:
-              - Include a main test that runs: python driver.py --base_dir=<dir>
-                and checks in output: "Model trained and saved to", "Predictions generated.",
-                "Accuracy:", "Precision:", "Recall:", "F1-score:"
-                and asserts files: <dir>/model.pkl and (if classification) <dir>/confusion_matrix.png
-              - Include at least one robustness test (e.g., single-class) and ensure no exceptions.
-              - Keep commands Ubuntu/Python3 friendly; do not install packages here.
+SCENARIOS:
+- MUST be concrete and aligned with dataset.csv columns.
+- Each scenario MUST have:
+    - name, category, severity
+    - input: { feature:value, ... }
+    - expected:
+        * kind: "classification" with { label: 0/1/... } 
+        * OR kind: "regression" with { value: <num>, tolerance: <num> }
+        * OR kind: "unsupervised" with { cluster: <int> } if clusters are meaningful
+        * If clusters are unknown, still set kind: "unsupervised" and leave expected empty.
 
-            User brief:
-            %s
-            """, contextFromFiles, brief);
+GENERATORS (MUST be list/grid style):
+- Use ONLY list/grid style input ranges.
+- Example:
+  generators:
+    - name: "Boundary grid"
+      mode: "grid"
+      input:
+        feature1: [0, 1, 10, 100]
+        feature2: [0, 50, 100]
+      expected: { kind: "classification" }  # adjust kind depending on task
 
-        Map<String, Object> body = Map.of(
-                "contents", List.of(Map.of("parts", List.of(Map.of("text", prompt))))
-        );
-        String finalUrl = url + apiKey;
+POLICIES (MUST use default keys):
+- Always include:
+  policies:
+    majority_baseline_margin: 0.02
+    binary_avg: "binary"
+    multiclass_avg: "weighted"
+    zero_division: 0
+    regression_tolerance_factor: 2.0
+    require_confusion_matrix: true
 
-        String raw = webClient.post()
-                .uri(finalUrl)
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
-                .retrieve()
-                .bodyToMono(String.class)
-                .block();
+========= BEGIN USER FILES =========
+%s
+========= END USER FILES =========
 
-        String yaml = extractPlainText(raw);
-        if (!StringUtils.hasText(yaml)) {
-            yaml = "tests:\n  - name: placeholder\n    steps:\n      - run: \"python driver.py --base_dir=<dir>\"\n";
+USER BRIEF:
+%s
+""";
+            tpl = tpl.replace("%%", "%%%%");
+            tpl = tpl.replace("%", "%%");
+            return String.format(tpl, ctx, brief);
         }
 
-        String versionKey = S3KeyUtil.join(S3KeyUtil.join(baseKey, "tests"), "tests_" + label + ".yaml");
-        String canonicalKey = S3KeyUtil.join(baseKey, "tests.yaml");
 
-        s3.putString(versionKey, yaml, "text/yaml");
-        return Map.of("versionKey", versionKey, "canonicalKey", canonicalKey);
-    }
+        static String refiner(String ctx, String strictBrief) {
+            String tpl = """
+Refine behaviour tests. Return ONLY YAML (no fences) with:
+tests:, scenarios:, generators:, policies:
 
-    // ===================== Internal: parse combined response & save to S3 =====================
+Keep Ubuntu/Python3 friendly; preserve existing scenarios; add new concrete ones derived from guidance.
+Scenarios MUST be LeetCode-style examples the driver can predict directly; avoid imaginary columns.
+**Behaviour-only CSV**: ensure the runner emits only scenario rows in tests.csv (expected vs predicted vs result). No metric rows in tests.csv.
 
-    private Map<String, String> parseAndSave(String geminiJson, String s3Prefix) {
-        String combined = extractAllTextFromGemini(geminiJson);
+GUIDANCE / ISSUES:
+%s
 
-        // Prefer language-tagged fenced blocks
-        String driver = firstGroup("(?s)```(?:python|py)\\s+(.*?)\\s*```", combined);
-        String tests  = firstGroup("(?s)```(?:yaml|yml)\\s+(.*?)\\s*```", combined);
-
-        // If missing, accept any fenced block for driver first, then next for tests
-        if (!StringUtils.hasText(driver)) {
-            driver = firstGroup("(?s)```\\s*(.*?)\\s*```", combined);
-        }
-        if (!StringUtils.hasText(tests)) {
-            String afterDriver = removeFirstFencedBlock(combined);
-            tests = firstGroup("(?s)```\\s*(.*?)\\s*```", afterDriver);
+REFERENCE FILES:
+========= BEGIN USER FILES =========
+%s
+========= END USER FILES =========
+""";
+            tpl = tpl.replace("%%", "%%%%");
+            tpl = tpl.replace("%", "%%");
+            return String.format(tpl, strictBrief, ctx);
         }
 
-        // Heuristic fallback: split by a YAML-looking start
-        if (!StringUtils.hasText(driver) || !StringUtils.hasText(tests)) {
-            int idx = indexOfYamlStart(combined);
-            if (idx > 0) {
-                if (!StringUtils.hasText(driver)) driver = combined.substring(0, idx);
-                if (!StringUtils.hasText(tests))  tests  = combined.substring(idx);
-            }
+        static String scenario(String ctx, String scenarioBrief) {
+            String tpl = """
+Build behaviour tests YAML (no fences) with sections: tests:, scenarios:, generators:, policies:
+
+- tests[0].run MUST be "python driver.py --base_dir=<dir>" with the standard stdout/file assertions.
+- scenarios MUST encode the brief as concrete feature→value cases using dataset.csv columns if visible.
+- expected:
+    kind: "classification" | "regression" | "unsupervised"
+    label (classification) OR value (+ optional tolerance) for regression OR cluster (unsupervised).
+- **Behaviour-only CSV**: scenarios must be emitted into tests.csv; do not write metric rows to tests.csv.
+- Include simple generators and default policies.
+
+SCENARIO BRIEF:
+%s
+
+FILES:
+========= BEGIN USER FILES =========
+%s
+========= END USER FILES =========
+""";
+            tpl = tpl.replace("%%", "%%%%");
+            tpl = tpl.replace("%", "%%");
+            return String.format(tpl, scenarioBrief, ctx);
         }
-
-        // Normalize/clean
-        driver = cleanBlock(driver);
-        tests  = cleanBlock(tests);
-
-        // Final safety nets
-        if (!StringUtils.hasText(driver)) {
-            driver = """
-                     def run_predictions(base_dir):
-                         raise RuntimeError("LLM did not return driver.py")
-                     """;
-        }
-        if (!StringUtils.hasText(tests)) {
-            tests = """
-                    tests:
-                      - name: Min accuracy
-                        category: Quality
-                        severity: high
-                        metric: accuracy
-                        threshold: 0.80
-                    """;
-        }
-
-        // Save to S3
-        String driverKey = S3KeyUtil.join(s3Prefix, "driver.py");
-        String testsKey  = S3KeyUtil.join(s3Prefix, "tests.yaml");
-        s3.putString(driverKey, driver, "text/x-python");
-        s3.putString(testsKey,  tests,  "text/yaml");
-
-        return Map.of("driverKey", driverKey, "testsKey", testsKey);
-    }
-
-    // ===================== Helpers: parse Gemini JSON & clean blocks =====================
-
-    /** Extracts all text parts from Gemini JSON response and concatenates with newlines. */
-    private String extractAllTextFromGemini(String geminiJson) {
-        try {
-            JsonNode root = mapper.readTree(geminiJson);
-            StringBuilder sb = new StringBuilder();
-
-            JsonNode candidates = root.get("candidates");
-            if (candidates != null && candidates.isArray()) {
-                for (JsonNode cand : candidates) {
-                    JsonNode content = cand.get("content");
-                    if (content == null) continue;
-                    JsonNode parts = content.get("parts");
-                    if (parts != null && parts.isArray()) {
-                        for (JsonNode part : parts) {
-                            JsonNode textNode = part.get("text");
-                            if (textNode != null && !textNode.isNull()) {
-                                String t = textNode.asText("");
-                                if (StringUtils.hasText(t)) {
-                                    if (sb.length() > 0) sb.append("\n");
-                                    sb.append(t);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Fallback: some responses may put text at root("text")
-            if (sb.length() == 0) {
-                String t = root.path("text").asText("");
-                if (StringUtils.hasText(t)) sb.append(t);
-            }
-
-            return normalizeNewlines(sb.toString());
-        } catch (Exception e) {
-            // If parsing fails, return raw
-            return normalizeNewlines(geminiJson);
-        }
-    }
-
-    /** Extract plain text (no code fences) from Gemini JSON; normalize newlines. */
-    private String extractPlainText(String geminiJson) {
-        try {
-            JsonNode root = mapper.readTree(geminiJson);
-            StringBuilder sb = new StringBuilder();
-
-            JsonNode candidates = root.get("candidates");
-            if (candidates != null && candidates.isArray()) {
-                for (JsonNode cand : candidates) {
-                    JsonNode content = cand.get("content");
-                    if (content == null) continue;
-                    JsonNode parts = content.get("parts");
-                    if (parts != null && parts.isArray()) {
-                        for (JsonNode part : parts) {
-                            JsonNode textNode = part.get("text");
-                            if (textNode != null && !textNode.isNull()) {
-                                String t = textNode.asText("");
-                                if (StringUtils.hasText(t)) {
-                                    if (sb.length() > 0) sb.append("\n");
-                                    sb.append(t);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (sb.length() == 0) {
-                String t = root.path("text").asText("");
-                if (StringUtils.hasText(t)) sb.append(t);
-            }
-
-            String out = normalizeNewlines(sb.toString()).trim();
-            // strip any accidental fenced blocks
-            out = out.replaceAll("(?s)```+.*?```+", "");
-            return out.trim();
-        } catch (Exception e) {
-            String out = normalizeNewlines(geminiJson);
-            out = out.replaceAll("(?s)```+.*?```+", "");
-            return out.trim();
-        }
-    }
-
-    /** Returns the first capturing group for the given regex or empty string. */
-    private String firstGroup(String regex, String src) {
-        if (!StringUtils.hasText(src)) return "";
-        Pattern p = Pattern.compile(regex);
-        Matcher m = p.matcher(src);
-        if (m.find()) {
-            return m.group(1);
-        }
-        return "";
-    }
-
-    /** Removes the first fenced code block (```...```) from the string. */
-    private String removeFirstFencedBlock(String src) {
-        if (!StringUtils.hasText(src)) return "";
-        Pattern p = Pattern.compile("(?s)```.*?```");
-        Matcher m = p.matcher(src);
-        return m.find() ? src.substring(0, m.start()) + src.substring(m.end()) : src;
-    }
-
-    /** Try to find a YAML block start (```yaml or a standalone 'tests:' at line start). */
-    private int indexOfYamlStart(String s) {
-        if (!StringUtils.hasText(s)) return -1;
-        int i = s.toLowerCase().indexOf("```yaml");
-        if (i >= 0) return i;
-        // Look for a line that starts with 'tests:'
-        Pattern p = Pattern.compile("(?m)^\\s*tests\\s*:");
-        Matcher m = p.matcher(s);
-        return m.find() ? m.start() : -1;
-    }
-
-    /** Cleans a code/text block: strip fences/backticks/lang tags, BOM, normalize newlines, and trim. */
-    private String cleanBlock(String block) {
-        if (!StringUtils.hasText(block)) return "";
-        String s = block;
-
-        // Remove surrounding fences/backticks if someone passed a fenced block into this method
-        s = s.replaceAll("(?s)^\\s*```(?:[a-zA-Z]+)?\\s*", "");
-        s = s.replaceAll("(?s)\\s*```\\s*$", "");
-
-        // Remove BOM
-        if (!s.isEmpty() && s.charAt(0) == '\uFEFF') {
-            s = s.substring(1);
-        }
-
-        // Normalize newlines
-        s = normalizeNewlines(s);
-
-        // Trim outer whitespace
-        s = s.trim();
-
-        // Remove accidental leading literal "\n"
-        if (s.startsWith("\\n")) {
-            s = s.replaceFirst("^\\\\n+", "");
-        }
-
-        // Ensure UTF-8 safe
-        s = new String(s.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-
-        return s;
-    }
-
-    /** Normalizes CRLF/CR to LF. */
-    private String normalizeNewlines(String s) {
-        if (s == null) return "";
-        return s.replace("\r\n", "\n").replace("\r", "\n");
     }
 }
