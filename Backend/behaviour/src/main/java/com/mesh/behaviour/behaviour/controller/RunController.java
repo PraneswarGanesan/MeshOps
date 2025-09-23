@@ -17,6 +17,7 @@ public class RunController {
 
     private final RunService runService;
 
+    // Start a run for a specific version (default: latest canonical version)
     @PostMapping("/start")
     public RunStatusView startRun(@RequestBody StartRunRequest req) {
         return runService.startRun(req);
@@ -41,5 +42,4 @@ public class RunController {
     public String getConsole(@PathVariable Long runId) {
         return runService.getConsole(runId);
     }
-
 }

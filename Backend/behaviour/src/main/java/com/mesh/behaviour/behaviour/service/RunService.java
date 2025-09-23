@@ -1,5 +1,6 @@
 package com.mesh.behaviour.behaviour.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mesh.behaviour.behaviour.config.AppProperties;
 import com.mesh.behaviour.behaviour.dto.ArtifactView;
 import com.mesh.behaviour.behaviour.dto.RunStatusView;
@@ -8,25 +9,35 @@ import com.mesh.behaviour.behaviour.model.Project;
 import com.mesh.behaviour.behaviour.model.Run;
 import com.mesh.behaviour.behaviour.repository.ProjectRepository;
 import com.mesh.behaviour.behaviour.repository.RunRepository;
+import com.mesh.behaviour.behaviour.util.S3KeyUtil;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.*;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.CommandInvocationStatus;
-import software.amazon.awssdk.services.ssm.model.SendCommandRequest;
 import software.amazon.awssdk.services.ssm.model.GetCommandInvocationRequest;
 import software.amazon.awssdk.services.ssm.model.GetCommandInvocationResponse;
 import software.amazon.awssdk.services.ssm.model.InvocationDoesNotExistException;
+import software.amazon.awssdk.services.ssm.model.SendCommandRequest;
+
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.time.Duration;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
 public class RunService {
+
+    private static final Logger log = LoggerFactory.getLogger(RunService.class);
 
     private final AppProperties props;
     private final ProjectRepository projects;
@@ -35,7 +46,14 @@ public class RunService {
     private final SsmClient ssm;
     private final Ec2Client ec2;
     private final ResultsIngestService resultsIngest;
+    private final ObjectMapper mapper = new ObjectMapper();
 
+    /* ===================== Run lifecycle ===================== */
+
+    /**
+     * Start a run. If StartRunRequest.versionName is provided it will run that version (e.g. "v0", "v1").
+     * Otherwise it will pick the latest numeric vX under artifacts/versions/.
+     */
     @Transactional
     public RunStatusView startRun(StartRunRequest req) {
         Project project = projects.findByUsernameAndProjectName(req.getUsername(), req.getProjectName())
@@ -45,7 +63,7 @@ public class RunService {
             throw new IllegalStateException("Project not approved");
         }
 
-        // ensure instance for this user
+        // ensure EC2 instance
         String instanceId = ensureUserInstance(project.getUsername());
 
         Run run = runs.save(Run.builder()
@@ -59,15 +77,25 @@ public class RunService {
                 .artifactsPrefix("")
                 .build());
 
-        // --- Store artifacts under artifacts-behaviour/run_X/ ---
         String artifactsPrefix = project.getUsername() + "/" + project.getProjectName()
                 + "/artifacts-behaviour/run_" + run.getId();
 
-        String baseKey = project.getS3Prefix().replace("s3://" + props.getAwsS3Bucket() + "/", "");
+        // baseKey is bucket-relative prefix for the project root (no s3://)
+        String baseKey = project.getS3Prefix().replaceFirst("^s3://", "")
+                .replaceFirst("^" + Pattern.quote(props.getAwsS3Bucket()) + "/", "")
+                .replaceAll("^/+", "")
+                .replaceAll("/+$", "");
 
+        // Choose version prefix (under artifacts/versions/)
+        String versionPrefix = chooseVersionPrefix(baseKey, req.getVersionName());
+        log.info("Selected versionPrefix='{}' for run {}", versionPrefix, run.getId());
+
+        // form S3 paths and runner command. runner.py expects --base_s3 and --out_s3 (full s3://bucket/key)
         String cmd = String.format(
                 "python3 /opt/automesh/runner.py --base_s3 s3://%s/%s --out_s3 s3://%s/%s --task %s --run_id %d",
-                props.getAwsS3Bucket(), baseKey, props.getAwsS3Bucket(), artifactsPrefix, req.getTask(), run.getId()
+                props.getAwsS3Bucket(), versionPrefix,
+                props.getAwsS3Bucket(), artifactsPrefix,
+                req.getTask(), run.getId()
         );
 
         var send = ssm.sendCommand(SendCommandRequest.builder()
@@ -78,10 +106,14 @@ public class RunService {
 
         run.setArtifactsPrefix(artifactsPrefix);
         run.setCommandId(send.command().commandId());
+        run.setVersionName(versionPrefix); // you may want to persist versionName column on Run entity (string)
         runs.save(run);
 
-        return toView(run);
+        RunStatusView view = toView(run);
+        writeStatusToS3(view); // sync initial status to S3
+        return view;
     }
+
     @Transactional(readOnly = true)
     public String getConsole(Long runId) {
         Run run = runs.findById(runId).orElseThrow();
@@ -113,12 +145,12 @@ public class RunService {
             return sb.toString().isBlank() ? "[status] " + status + "\n(no output yet)" : sb.toString();
 
         } catch (InvocationDoesNotExistException e) {
-            // Command hasn’t started or SSM hasn’t picked it up yet
             return "Invocation not available yet. Try again in a few seconds.";
         } catch (Exception e) {
             return "Failed to fetch console output: " + e.getMessage();
         }
     }
+
     @Transactional
     public RunStatusView pollAndUpdate(Long runId) {
         Run run = runs.findById(runId).orElseThrow();
@@ -139,7 +171,9 @@ public class RunService {
                 run.setIsDone(true);
                 run.setIsSuccess(true);
                 run.setFinishedAt(now());
-                resultsIngest.ingestRunArtifacts(run);
+                runs.save(run);
+                // ingest artifacts: this should read outputs under run.artifactsPrefix
+                try { resultsIngest.ingestRunArtifacts(run); } catch (Exception ex) { log.error("Ingest failed", ex); }
                 stopInstanceIfIdle(run.getInstanceId());
             }
             case CANCELLED, TIMED_OUT, FAILED -> {
@@ -147,17 +181,35 @@ public class RunService {
                 run.setIsDone(true);
                 run.setIsSuccess(false);
                 run.setFinishedAt(now());
+                runs.save(run);
                 stopInstanceIfIdle(run.getInstanceId());
             }
+            default -> { /* keep current state */ }
         }
-        runs.save(run);
-        return toView(run);
+
+        RunStatusView view = toView(run);
+        writeStatusToS3(view); // sync to S3
+        return view;
     }
 
     @Transactional(readOnly = true)
     public RunStatusView getStatus(Long runId) {
-        Run run = runs.findById(runId).orElseThrow();
-        return toView(run);
+        Optional<Run> optRun = runs.findById(runId);
+        if (optRun.isPresent()) {
+            return toView(optRun.get());
+        }
+        // fallback: try S3
+        String prefix = "artifacts-behaviour/run_" + runId;
+        String key = prefix + "/status.json";
+        if (s3.exists(key)) {
+            try {
+                String json = s3.getString(key);
+                return mapper.readValue(json, RunStatusView.class);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to read status.json from S3", e);
+            }
+        }
+        throw new IllegalArgumentException("Run not found: " + runId);
     }
 
     @Transactional(readOnly = true)
@@ -175,13 +227,75 @@ public class RunService {
         return out;
     }
 
-    // ============ EC2 helpers ============
+    /* ===================== Version selection helpers ===================== */
+
+    /**
+     * Choose a version prefix under: <baseKey>/artifacts/versions/
+     * - If requestedVersion provided and exists -> return that prefix (with trailing slash).
+     * - Else scan available version folders (v0, v1, v2...) and pick highest numeric vN.
+     * - If nothing found, return baseKey (project root) with trailing slash (caller must handle).
+     *
+     * NOTE: s3.listKeys(prefix) returns object keys under prefix.
+     */
+    private String chooseVersionPrefix(String baseKey, String requestedVersion) {
+        String versionsBase = S3KeyUtil.join(baseKey, "artifacts/versions");
+        if (!versionsBase.endsWith("/")) versionsBase = versionsBase + "/";
+
+        if (StringUtils.hasText(requestedVersion)) {
+            // normalize requested to not include slashes
+            String normalized = requestedVersion.replaceAll("^/+", "").replaceAll("/+$", "");
+            String candidate = S3KeyUtil.join(versionsBase, normalized) + "/";
+            if (s3.existsPrefix(candidate)) return candidate;
+            throw new IllegalArgumentException("Requested version not found: " + requestedVersion);
+        }
+
+        // List keys under versionsBase and parse unique immediate folders
+        List<String> keys = Collections.emptyList();
+        try {
+            keys = s3.listKeys(versionsBase);
+        } catch (Exception e) {
+            log.warn("Failed listing version keys for prefix {}: {}", versionsBase, e.getMessage());
+            keys = Collections.emptyList();
+        }
+
+        int maxNum = -1;
+        String best = null;
+        Pattern p = Pattern.compile("^v(\\d+)$");
+        for (String k : keys) {
+            String rest = k;
+            if (rest.startsWith(versionsBase)) rest = rest.substring(versionsBase.length());
+            String[] parts = rest.split("/");
+            if (parts.length > 0 && StringUtils.hasText(parts[0])) {
+                Matcher m = p.matcher(parts[0]);
+                if (m.find()) {
+                    try {
+                        int n = Integer.parseInt(m.group(1));
+                        if (n > maxNum) {
+                            maxNum = n;
+                            best = parts[0];
+                        }
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        }
+
+        if (best != null) {
+            return S3KeyUtil.join(versionsBase, best) + "/";
+        }
+
+        // fallback: no versions found -> use canonical project root
+        String fallback = baseKey.endsWith("/") ? baseKey : baseKey + "/";
+        log.warn("No versions found under {}; falling back to {}", versionsBase, fallback);
+        return fallback;
+    }
+
+    /* ===================== EC2 helpers (unchanged) ===================== */
 
     private String ensureUserInstance(String username) {
         var res = ec2.describeInstances(DescribeInstancesRequest.builder()
                 .filters(
-                        Filter.builder().name("tag:automesh-owner").values(username).build(),
-                        Filter.builder().name("instance-state-name").values("running","stopped").build()
+                        software.amazon.awssdk.services.ec2.model.Filter.builder().name("tag:automesh-owner").values(username).build(),
+                        software.amazon.awssdk.services.ec2.model.Filter.builder().name("instance-state-name").values("running","stopped").build()
                 ).build());
 
         String instanceId = res.reservations().stream()
@@ -195,16 +309,13 @@ public class RunService {
         } else {
             String state = res.reservations().get(0).instances().get(0).state().nameAsString();
             if ("stopped".equalsIgnoreCase(state)) {
-                ec2.startInstances(StartInstancesRequest.builder().instanceIds(instanceId).build());
+                ec2.startInstances(software.amazon.awssdk.services.ec2.model.StartInstancesRequest.builder().instanceIds(instanceId).build());
             }
         }
 
-        // Wait until instance is running
         ec2.waiter().waitUntilInstanceRunning(
                 DescribeInstancesRequest.builder().instanceIds(instanceId).build()
         );
-
-        // Wait until status checks passed
         ec2.waiter().waitUntilInstanceStatusOk(
                 DescribeInstanceStatusRequest.builder().instanceIds(instanceId).build()
         );
@@ -228,8 +339,9 @@ public class RunService {
                         .build())
                 .userData(userData)
                 .tagSpecifications(TagSpecification.builder()
-                        .resourceType(ResourceType.INSTANCE)
-                        .tags(Tag.builder().key("automesh-owner").value(username).build())
+                        .resourceType(software.amazon.awssdk.services.ec2.model.ResourceType.INSTANCE)
+                        .tags(software.amazon.awssdk.services.ec2.model.Tag.builder()
+                                .key("automesh-owner").value(username).build())
                         .build())
                 .build());
 
@@ -237,214 +349,33 @@ public class RunService {
     }
 
     private void stopInstanceIfIdle(String instanceId) {
-        ec2.stopInstances(StopInstancesRequest.builder().instanceIds(instanceId).build());
+        ec2.stopInstances(software.amazon.awssdk.services.ec2.model.StopInstancesRequest.builder().instanceIds(instanceId).build());
     }
 
     private String ubuntuUserData() {
-        return """
+        return """ 
 #!/bin/bash
 set -eux
 apt-get update -y
-apt-get install -y snapd python3 python3-pip
+apt-get install -y snapd python3 python3-pip awscli
 snap install amazon-ssm-agent --classic || true
 systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || true
 
-# Install safe baseline dependencies
-pip3 install boto3 scikit-learn matplotlib pandas numpy pyyaml pillow
+# Upgrade pip & install heavy ML deps
+pip3 install --upgrade pip
+pip3 install boto3 scikit-learn matplotlib pandas numpy pyyaml pillow torch torchvision transformers
 
+# Setup Automesh runner
 mkdir -p /opt/automesh
-cat > /opt/automesh/runner.py <<'PYEOF'
-#!/usr/bin/env python3
-import os, sys, subprocess, json, boto3, traceback
+aws s3 cp s3://my-users-meshops-bucket/code/meshops/runner.py /opt/automesh/runner.py || true
+chmod +x /opt/automesh/runner.py || true
 
-def parse_s3(uri):
-    uri = uri.replace("s3://", "")
-    bucket, key = uri.split("/", 1)
-    return bucket, key
-
-def upload_file(s3, local, bucket, key):
-    if os.path.exists(local):
-        s3.upload_file(local, bucket, key)
-
-def detect_task_from_logs(log_path):
-    try:
-        with open(log_path) as f:
-            text = f.read().lower()
-        if "mae:" in text or "rmse:" in text:
-            return "regression"
-        if "accuracy:" in text or "precision:" in text or "recall:" in text or "f1-score:" in text:
-            return "classification"
-    except:
-        pass
-    return "classification"
-
-def majority_baseline_from_tests_csv(tests_csv):
-    try:
-        import csv
-        with open(tests_csv, newline='') as f:
-            reader = csv.reader(f)
-            headers = next(reader, [])
-            hmap = {h.strip().lower(): i for i, h in enumerate(headers)}
-            expected_i = hmap.get("expected")
-            predicted_i = hmap.get("predicted")
-            if expected_i is None or predicted_i is None:
-                return None, None, None
-            ys, ps = [], []
-            for row in reader:
-                if len(row) <= max(expected_i, predicted_i): continue
-                ys.append(row[expected_i])
-                ps.append(row[predicted_i])
-
-            if not ys:
-                return None, None, None
-
-            from collections import Counter
-            cnt = Counter(ys)
-            majority_label, majority_count = max(cnt.items(), key=lambda kv: kv[1])
-            baseline_acc = majority_count / float(len(ys))
-            unique_preds = len(set(ps))
-            return baseline_acc, unique_preds, majority_label
-    except Exception:
-        return None, None, None
-
-def write_manifest_and_hints(workdir, metrics_path, tests_path, confusion_path, log_path):
-    manifest = {}
-    task_type = detect_task_from_logs(log_path)
-    manifest["task_type"] = task_type
-    manifest["pipeline"] = "driver.py -> metrics.json/tests.csv"
-    if os.path.exists(metrics_path):
-        try:
-            with open(metrics_path) as f:
-                manifest["metrics"] = json.load(f)
-        except:
-            pass
-
-    baseline_acc, unique_preds, majority_label = majority_baseline_from_tests_csv(tests_path) if os.path.exists(tests_path) else (None, None, None)
-    manifest["majority_baseline_acc"] = baseline_acc
-    manifest["unique_preds"] = unique_preds
-    manifest["majority_label"] = majority_label
-
-    with open(os.path.join(workdir, "manifest.json"), "w") as f:
-        json.dump(manifest, f, indent=2)
-
-    issues = []
-    if task_type == "classification":
-        if unique_preds is not None and unique_preds < 2:
-            issues.append("DEGENERATE_PREDICTIONS")
-        if baseline_acc is not None:
-            try:
-                with open(metrics_path) as f:
-                    m = json.load(f)
-                acc = m.get("accuracy") or m.get("acc") or m.get("Accuracy")
-                if isinstance(acc, (int,float)) and acc <= (baseline_acc + 0.01):
-                    issues.append("MAJORITY_BASELINE")
-            except:
-                pass
-        if not os.path.exists(confusion_path):
-            issues.append("NO_CONFUSION_MATRIX")
-
-    hints = {
-        "issues": issues,
-        "notes": {
-            "unique_preds": unique_preds,
-            "majority_baseline_acc": baseline_acc,
-            "majority_label": majority_label
-        }
-    }
-    with open(os.path.join(workdir, "refiner_hints.json"), "w") as f:
-        json.dump(hints, f, indent=2)
-
-def main():
-    if len(sys.argv) < 9:
-        print("Usage: runner.py --base_s3 <s3://...> --out_s3 <s3://...> --task <task> --run_id <id>")
-        sys.exit(1)
-
-    args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
-    base_s3 = args.get("--base_s3")
-    out_s3  = args.get("--out_s3")
-    task    = args.get("--task")
-    run_id  = args.get("--run_id")
-
-    bucket, base_prefix = parse_s3(base_s3)
-    _, out_prefix = parse_s3(out_s3)
-    workdir = f"/tmp/run_{run_id}"
-    os.makedirs(workdir, exist_ok=True)
-
-    s3 = boto3.client("s3")
-
-    # 1. Download known project files
-    files = ["driver.py","tests.yaml","dataset.csv","train.py","predict.py","requirements.txt"]
-    for f in files:
-        try:
-            s3.download_file(bucket, f"{base_prefix}/{f}", os.path.join(workdir,f))
-            print(f"Downloaded {f}")
-        except Exception:
-            pass
-
-    # 2. Install dependencies
-    reqs = os.path.join(workdir, "requirements.txt")
-    if os.path.exists(reqs):
-        print("Installing project requirements...")
-        subprocess.run([sys.executable,"-m","pip","install","-r",reqs],check=False)
-    else:
-        print("No requirements.txt found, using baseline packages already installed.")
-
-    # 3. Run driver.py
-    driver = os.path.join(workdir,"driver.py")
-    log_path = os.path.join(workdir,"logs.txt")
-    try:
-        with open(log_path,"w") as logf:
-            subprocess.run([sys.executable,driver,"--base_dir",workdir],
-                           stdout=logf,stderr=logf,check=False)
-    except Exception:
-        with open(log_path,"a") as logf:
-            traceback.print_exc(file=logf)
-
-    # 4. Ensure metrics.json exists (scrape from logs if needed)
-    metrics_path = os.path.join(workdir,"metrics.json")
-    if not os.path.exists(metrics_path):
-        metrics = {}
-        try:
-            with open(log_path) as f:
-                for line in f:
-                    ls = line.strip()
-                    for key in ["Accuracy","Precision","Recall","F1-score","MAE","RMSE"]:
-                        if ls.startswith(key + ":"):
-                            try:
-                                val = float(ls.split(":")[1])
-                                k = key.lower().replace("-score","")
-                                metrics[k] = val
-                            except: pass
-            if metrics:
-                with open(metrics_path,"w") as f: json.dump(metrics,f)
-        except: pass
-
-    # 5. Use driver's tests.csv if exists, else fallback to empty schema
-    tests_path = os.path.join(workdir,"tests.csv")
-    if not os.path.exists(tests_path) or os.path.getsize(tests_path) == 0:
-        with open(tests_path, "w") as f:
-            f.write("name,category,severity,metric,threshold,expected,predicted,result\\n")
-        print("⚠️ Driver did not produce tests.csv — created EMPTY placeholder")
-        print("Fallback tests.csv created as EMPTY placeholder (no scenarios)")
-
-    # 6. Derive manifest + refiner hints
-    confusion_path = os.path.join(workdir,"confusion_matrix.png")
-    write_manifest_and_hints(workdir, metrics_path, tests_path, confusion_path, log_path)
-
-    # 7. Upload artifacts
-    for f in ["metrics.json","tests.csv","confusion_matrix.png","logs.txt","manifest.json","refiner_hints.json"]:
-        upload_file(s3, os.path.join(workdir,f), bucket, f"{out_prefix}/{f}")
-
-if __name__=="__main__":
-    main()
-PYEOF
-
-chmod +x /opt/automesh/runner.py
+echo "[`date -u +%Y-%m-%dT%H:%M:%SZ`] Automesh behaviour runner bootstrap complete"
 """;
     }
 
-    // ============ helpers ============
+    /* ===================== helpers ===================== */
 
     private RunStatusView toView(Run run) {
         return RunStatusView.builder()
@@ -469,5 +400,17 @@ chmod +x /opt/automesh/runner.py
         if (name.endsWith(".png"))  return "image/png";
         if (name.endsWith(".txt"))  return "text/plain";
         return "application/octet-stream";
+    }
+
+    /* ===================== S3 sync ===================== */
+
+    private void writeStatusToS3(RunStatusView view) {
+        try {
+            String key = view.getArtifactsPrefix() + "/status.json";
+            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(view);
+            s3.putString(key, json, "application/json");
+        } catch (Exception e) {
+            log.error("Failed to write status.json to S3", e);
+        }
     }
 }

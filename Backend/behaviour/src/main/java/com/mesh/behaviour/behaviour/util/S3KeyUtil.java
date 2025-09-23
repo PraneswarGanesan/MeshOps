@@ -39,6 +39,24 @@ public final class S3KeyUtil {
     public static String artifactsPrefix(String baseKey, long runId) {
         return join(join(baseKey, "artifacts"), "run_" + runId + "/");
     }
+    public static String join(String... parts) {
+        if (parts == null || parts.length == 0) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String p : parts) {
+            if (p == null || p.isBlank()) continue;
+            String clean = p.trim();
+            // Remove leading/trailing slashes
+            while (clean.startsWith("/")) clean = clean.substring(1);
+            while (clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
+            if (!clean.isEmpty()) {
+                if (sb.length() > 0) sb.append("/");
+                sb.append(clean);
+            }
+        }
+        return sb.toString();
+    }
 
     // Standard artifact filenames under the artifacts prefix
     public static String metricsJson(String artifactsPrefix) { return join(artifactsPrefix, "metrics.json"); }

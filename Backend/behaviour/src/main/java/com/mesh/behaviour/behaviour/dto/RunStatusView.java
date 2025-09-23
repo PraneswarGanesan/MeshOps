@@ -10,20 +10,14 @@ import java.sql.Timestamp;
 @AllArgsConstructor
 public class RunStatusView {
     private Long runId;
-
     private String username;
     private String projectName;
+    private String version;       // NEW
     private String task;
-
     private Boolean isRunning;
     private Boolean isDone;
     private Boolean isSuccess;
-
     private String instanceId;
     private String commandId;
-
     private String artifactsPrefix;
-
-    private Timestamp startedAt;
-    private Timestamp finishedAt;
 }

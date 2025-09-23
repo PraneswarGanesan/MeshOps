@@ -1,30 +1,45 @@
 import pandas as pd
+import numpy as np
+import joblib
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
-import joblib
+from sklearn.ensemble import RandomForestClassifier
 
-# Load dataset
-data = pd.read_csv("dataset.csv")
+def train(input_path="dataset.csv", model_path="model.pkl"):
+    # Load dataset
+    df = pd.read_csv(input_path)
 
-# Features and target
-X = data[["amount", "duration", "age", "is_international"]]
-y = data["is_fraud"]
+    # Drop identifiers
+    if "transaction_id" in df.columns:
+        df = df.drop(columns=["transaction_id"])
 
-# Train-test split
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.3, random_state=42
-)
+    # Features / target
+    X = df.drop(columns=["is_fraud"])
+    y = df["is_fraud"]
 
-# Train Logistic Regression (tuned for better accuracy)
-model = LogisticRegression(max_iter=2000, solver="liblinear")
-model.fit(X_train, y_train)
+    # Handle NaNs
+    X = X.fillna(X.median())
 
-# Save model
-joblib.dump(model, "fraud_model.pkl")
+    # Train/test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
+    )
 
-# Evaluate
-train_score = model.score(X_train, y_train)
-test_score = model.score(X_test, y_test)
+    # Try LogisticRegression → fallback RandomForest
+    try:
+        model = LogisticRegression(max_iter=500, random_state=42)
+        model.fit(X_train, y_train)
+    except Exception:
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X_train, y_train)
 
-print(f"Training Accuracy: {train_score:.2f}")
-print(f"Test Accuracy: {test_score:.2f}")
+    # Save trained model
+    joblib.dump(model, model_path)
+    print(f"[Automesh.ai] Model saved to {model_path}")
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 2:
+        train(sys.argv[1], sys.argv[2])
+    else:
+        train()

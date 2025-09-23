@@ -1,13 +1,16 @@
+// src/main/java/com/mesh/behaviour/behaviour/service/PlanService.java
 package com.mesh.behaviour.behaviour.service;
 
-import com.mesh.behaviour.behaviour.dto.ActivateTestsRequest;
-import com.mesh.behaviour.behaviour.dto.ApprovePlanRequest;
 import com.mesh.behaviour.behaviour.dto.GeneratePlanRequest;
 import com.mesh.behaviour.behaviour.dto.GenerateTestsRequest;
+import com.mesh.behaviour.behaviour.dto.ApprovePlanRequest;
+import com.mesh.behaviour.behaviour.dto.ActivateTestsRequest;
 import com.mesh.behaviour.behaviour.model.Project;
 import com.mesh.behaviour.behaviour.repository.ProjectRepository;
 import com.mesh.behaviour.behaviour.util.S3KeyUtil;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Mono;
@@ -20,16 +23,14 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class PlanService {
 
+    private final Logger log = LoggerFactory.getLogger(PlanService.class);
+
     private final ProjectRepository projects;
     private final S3Service s3;
     private final LlmService llm;
 
-    // ===================== EXISTING: Generate driver.py + tests.yaml =====================
+    private static final String ARTIFACTS_PREFIX = "artifacts/versions/";
 
-    /**
-     * Calls LLM to generate driver.py + tests.yaml, writes them to S3 under the project's s3Prefix.
-     * Returns S3 keys and file contents (trimmed/safe) for frontend preview.
-     */
     @Transactional
     public Mono<Map<String, String>> generateAndSave(String username,
                                                      String projectName,
@@ -37,45 +38,30 @@ public class PlanService {
         Project project = projects.findByUsernameAndProjectName(username, projectName)
                 .orElseThrow(() -> new IllegalArgumentException("Project not found"));
 
-        String baseKey = S3KeyUtil.keyOf(project.getS3Prefix());
+        String baseKey = normalizeBaseKey(project.getS3Prefix());
 
-        // ---- DEFAULT FILE LIST if client didn't send any ----
-        List<String> files = (req.getFiles() == null || req.getFiles().isEmpty())
-                ? List.of("driver.py", "tests.yaml", "train.py", "predict.py", "dataset.csv",
-                "pre-processed/images/")   // folder hint is OK; we’ll just note it
-                : req.getFiles();
+        if (baseKey.endsWith("/artifacts") || baseKey.endsWith("/artifacts/")) {
+            baseKey = baseKey.replaceAll("/?artifacts/?$", "");
+        }
 
-        // ---- Build context from selected files (sampled/truncated safely) ----
-        StringBuilder ctx = new StringBuilder();
-        ctx.append("### User-selected project files (content included/truncated) ###\n");
+        String versionPrefix = createNewVersionSnapshot(baseKey);
 
-        int maxCharsPerFile = 60_000;
-        int csvMaxLines = 150;
-
-        for (String rel : files) {
-            String key = S3KeyUtil.join(baseKey, rel.replaceFirst("^/+", "")); // normalize
-            if (!s3.exists(key)) {
-                ctx.append("\n[missing] ").append(rel).append("\n");
-                continue;
-            }
-            if (isTextLike(rel)) {
-                String text = s3.getStringSafe(key, maxCharsPerFile, csvMaxLines);
-                ctx.append("\n===== BEGIN FILE: ").append(rel).append(" =====\n")
-                        .append(text)
-                        .append("\n===== END FILE: ").append(rel).append(" =====\n");
-            } else {
-                // For non-text (images etc.) just acknowledge presence
-                ctx.append("\n[binary or non-text content sampled/omitted] ").append(rel).append("\n");
+        StringBuilder ctx = new StringBuilder("### Context for analysis ###\n");
+        for (String rel : List.of("train.py", "predict.py", "dataset.csv", "images/", "texts/", "hf_model/")) {
+            String key = S3KeyUtil.join(baseKey, rel.replaceFirst("^/+", ""));
+            if (s3.exists(key) || s3.existsPrefix(key)) {
+                ctx.append("\n[file] ").append(rel).append("\n");
+                ctx.append(s3.getStringSafe(key, 30_000, 100)).append("\n");
             }
         }
 
-        // ---- Call LLM → directly save driver/tests into S3 ----
-        return llm.generateAndSaveToS3(
-                (req.getBrief() == null ? "" : req.getBrief()),
+        return llm.generateDriverUsingAdaptivePrompt(
+                Optional.ofNullable(req.getBrief()).orElse(""),
                 ctx.toString(),
-                baseKey
+                baseKey,
+                versionPrefix,
+                true
         ).map(keys -> {
-            // update project with new keys, mark NOT approved yet
             project.setDriverKey(keys.get("driverKey"));
             project.setTestsKey(keys.get("testsKey"));
             project.setApproved(false);
@@ -84,13 +70,12 @@ public class PlanService {
             return Map.of(
                     "driverKey", keys.get("driverKey"),
                     "testsKey", keys.get("testsKey"),
+                    "analysisKey", keys.getOrDefault("analysisKey", ""),
                     "driverContent", s3.getStringSafe(keys.get("driverKey"), 100_000, 200),
                     "testsContent", s3.getStringSafe(keys.get("testsKey"), 50_000, 200)
             );
         });
     }
-
-    // ===================== EXISTING: Approve plan =====================
 
     @Transactional
     public Project approvePlan(ApprovePlanRequest req) {
@@ -108,18 +93,15 @@ public class PlanService {
         }
 
         project.setApproved(req.getApproved() != null ? req.getApproved() : false);
-
         return projects.save(project);
     }
-
-    // ===================== NEW: List canonical + versioned tests =====================
 
     @Transactional(readOnly = true)
     public Map<String, Object> listAllTests(String username, String projectName) {
         Project project = projects.findByUsernameAndProjectName(username, projectName)
                 .orElseThrow(() -> new IllegalArgumentException("Project not found"));
 
-        String baseKey = S3KeyUtil.keyOf(project.getS3Prefix());
+        String baseKey = normalizeBaseKey(project.getS3Prefix());
         String canonicalKey = S3KeyUtil.join(baseKey, "tests.yaml");
         String versionsPrefix = S3KeyUtil.join(baseKey, "tests/");
 
@@ -135,13 +117,6 @@ public class PlanService {
         return out;
     }
 
-    // ===================== NEW: Generate fresh tests (versioned) =====================
-
-    /**
-     * Generate a new tests.yaml from LLM and save it under <baseKey>/tests/tests_<label>.yaml.
-     * Optionally activate it (copy into canonical tests.yaml and update project.testsKey).
-     * Driver is NOT modified here.
-     */
     @Transactional
     public Map<String, String> generateNewTests(String username,
                                                 String projectName,
@@ -149,13 +124,12 @@ public class PlanService {
         Project project = projects.findByUsernameAndProjectName(username, projectName)
                 .orElseThrow(() -> new IllegalArgumentException("Project not found"));
 
-        String baseKey = S3KeyUtil.keyOf(
+        String baseKey = normalizeBaseKey(
                 (req.getS3Prefix() != null && !req.getS3Prefix().isBlank())
                         ? req.getS3Prefix()
                         : project.getS3Prefix()
         );
 
-        // Build context bundle (similar policy to generateAndSave)
         List<String> files = (req.getFiles() == null || req.getFiles().isEmpty())
                 ? List.of("train.py", "predict.py", "dataset.csv")
                 : req.getFiles();
@@ -164,7 +138,7 @@ public class PlanService {
         int maxCharsPerFile = 60_000, csvMaxLines = 150;
         for (String rel : files) {
             String key = S3KeyUtil.join(baseKey, rel);
-            if (!s3.exists(key)) {
+            if (!s3.exists(key) && !s3.existsPrefix(key)) {
                 ctx.append("\n[missing] ").append(rel).append("\n");
                 continue;
             }
@@ -189,29 +163,19 @@ public class PlanService {
                 label
         );
 
-        // Optionally activate immediately (copy versioned → canonical; update project)
         if (Boolean.TRUE.equals(req.getActivate())) {
             String versionKey = keys.get("versionKey");
             String canonicalKey = keys.get("canonicalKey");
-
-            // S3Service has no copy; emulate by read & write
             String content = s3.getString(versionKey);
             s3.putString(canonicalKey, content, "text/yaml");
-
             project.setTestsKey(canonicalKey);
             projects.save(project);
 
-            keys = Map.of(
-                    "versionKey", versionKey,
-                    "canonicalKey", canonicalKey,
-                    "activated", "true"
-            );
+            keys = Map.of("versionKey", versionKey, "canonicalKey", canonicalKey, "activated", "true");
         }
 
         return keys;
     }
-
-    // ===================== NEW: Activate a chosen version as canonical =====================
 
     @Transactional
     public Map<String, String> activateTests(String username,
@@ -220,7 +184,7 @@ public class PlanService {
         Project project = projects.findByUsernameAndProjectName(username, projectName)
                 .orElseThrow(() -> new IllegalArgumentException("Project not found"));
 
-        String baseKey = S3KeyUtil.keyOf(
+        String baseKey = normalizeBaseKey(
                 (req.getS3Prefix() != null && !req.getS3Prefix().isBlank())
                         ? req.getS3Prefix()
                         : project.getS3Prefix()
@@ -230,8 +194,6 @@ public class PlanService {
         if (!s3.exists(versionKey)) throw new IllegalArgumentException("tests key not found: " + versionKey);
 
         String canonicalKey = S3KeyUtil.join(baseKey, "tests.yaml");
-
-        // S3Service has no copy; emulate by read & write
         String content = s3.getString(versionKey);
         s3.putString(canonicalKey, content, "text/yaml");
 
@@ -241,12 +203,39 @@ public class PlanService {
         return Map.of("canonicalKey", canonicalKey, "activatedFrom", versionKey);
     }
 
-    // ===================== helpers =====================
+    private String createNewVersionSnapshot(String baseKey) {
+        String versionsRoot = S3KeyUtil.join(baseKey, ARTIFACTS_PREFIX);
+        List<String> keys = s3.listKeys(versionsRoot);
+        int maxV = -1;
+        for (String k : keys) {
+            String normalized = k.startsWith(versionsRoot) ? k.substring(versionsRoot.length()) : k;
+            String[] parts = normalized.split("/");
+            if (parts.length > 0 && parts[0].matches("v\\d+")) {
+                try {
+                    int num = Integer.parseInt(parts[0].substring(1));
+                    maxV = Math.max(maxV, num);
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        int newV = Math.max(1, maxV + 1);
+        return S3KeyUtil.join(versionsRoot, "v" + newV + "/");
+    }
 
     private boolean isTextLike(String name) {
         String n = name.toLowerCase();
         return n.endsWith(".py") || n.endsWith(".txt") || n.endsWith(".md")
                 || n.endsWith(".json") || n.endsWith(".yaml") || n.endsWith(".yml")
                 || n.endsWith(".csv") || n.endsWith(".tsv");
+    }
+
+    private String normalizeBaseKey(String s3PrefixOrKey) {
+        if (s3PrefixOrKey == null || s3PrefixOrKey.isBlank()) {
+            throw new IllegalArgumentException("Missing s3Prefix");
+        }
+        String in = s3PrefixOrKey.trim();
+        if (in.startsWith("s3://")) return S3KeyUtil.keyOf(in);
+        if (in.startsWith("/")) in = in.substring(1);
+        while (in.endsWith("/")) in = in.substring(0, in.length() - 1);
+        return in;
     }
 }

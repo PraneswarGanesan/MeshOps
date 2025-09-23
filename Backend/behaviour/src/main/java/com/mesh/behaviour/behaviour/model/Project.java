@@ -19,8 +19,11 @@ public class Project {
 
     private String s3Prefix;
 
-    private String driverKey;
-    private String testsKey;
+    private String driverKey;   // canonical driver (usually vN/driver.py)
+    private String testsKey;    // canonical tests (tests/tests.yaml)
 
     private Boolean approved;
+
+    // NEW: track which version is active
+    private Integer currentVersion;  // starts at 0 (base upload)
 }

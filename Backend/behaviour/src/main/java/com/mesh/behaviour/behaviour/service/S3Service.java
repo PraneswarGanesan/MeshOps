@@ -1,3 +1,4 @@
+// src/main/java/com/mesh/behaviour/behaviour/service/S3Service.java
 package com.mesh.behaviour.behaviour.service;
 
 import com.mesh.behaviour.behaviour.config.AppProperties;
@@ -30,12 +31,50 @@ public class S3Service {
     private final S3Client s3;
     private final S3Presigner presigner;
 
+    public String getBucketName() {
+        String raw = props.getAwsS3Bucket();
+        if (raw == null || raw.isBlank()) {
+            throw new IllegalStateException("AWS S3 bucket name not configured");
+        }
+        return raw.trim().replaceFirst("^s3://", "").replaceAll("/+$", "");
+    }
+
+    /**
+     * Safe reader: limit number of characters and lines when fetching large objects.
+     */
+    public String getStringSafe(String key, int maxChars, int maxLines) {
+        try (ResponseInputStream<GetObjectResponse> s3Object = s3.getObject(
+                GetObjectRequest.builder()
+                        .bucket(getBucketName())
+                        .key(key)
+                        .build())) {
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(s3Object, StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            int lines = 0;
+
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append("\n");
+                lines++;
+
+                if (sb.length() >= maxChars || lines >= maxLines) {
+                    break;
+                }
+            }
+            return sb.toString();
+
+        } catch (Exception e) {
+            return ""; // safe fallback
+        }
+    }
+
     /* -------------------- Basic put/get (text) -------------------- */
 
     public String putString(String key, String content, String contentType) {
         s3.putObject(
                 PutObjectRequest.builder()
-                        .bucket(props.getAwsS3Bucket())
+                        .bucket(getBucketName())
                         .key(key)
                         .contentType(contentType)
                         .build(),
@@ -44,26 +83,33 @@ public class S3Service {
         return key;
     }
 
+    public void copy(String srcKey, String destKey) {
+        s3.copyObject(CopyObjectRequest.builder()
+                .sourceBucket(getBucketName())
+                .sourceKey(srcKey)
+                .destinationBucket(getBucketName())
+                .destinationKey(destKey)
+                .build());
+    }
+
     public boolean exists(String key) {
         try {
             s3.headObject(HeadObjectRequest.builder()
-                    .bucket(props.getAwsS3Bucket())
+                    .bucket(getBucketName())
                     .key(key)
                     .build());
             return true;
         } catch (NoSuchKeyException e) {
             return false;
         } catch (Exception e) {
-            // If any other error, treat as not-exists for MVP
             return false;
         }
     }
 
-    /** Read whole object as UTF-8 text (driver.py, tests.yaml, metrics.json, etc.). */
     public String getString(String key) {
         try (ResponseInputStream<GetObjectResponse> s3Object = s3.getObject(
                 GetObjectRequest.builder()
-                        .bucket(props.getAwsS3Bucket())
+                        .bucket(getBucketName())
                         .key(key)
                         .build())) {
             return new BufferedReader(new InputStreamReader(s3Object, StandardCharsets.UTF_8))
@@ -74,32 +120,10 @@ public class S3Service {
         }
     }
 
-    /**
-     * Read text safely for prompts: sample CSV lines and/or truncate to maxChars.
-     * Useful when sending file snippets to an LLM.
-     */
-    public String getStringSafe(String key, int maxChars, int csvMaxLines) {
-        String text = getString(key);
-        String lower = key.toLowerCase();
-        if (lower.endsWith(".csv") || lower.endsWith(".tsv")) {
-            String sampled = text.lines()
-                    .limit(csvMaxLines)
-                    .collect(Collectors.joining("\n"));
-            return sampled.length() > maxChars
-                    ? sampled.substring(0, maxChars) + "\n# ...truncated..."
-                    : sampled;
-        }
-        return text.length() > maxChars
-                ? text.substring(0, maxChars) + "\n# ...truncated..."
-                : text;
-    }
-
-    /* -------------------- Binary helpers -------------------- */
-
     public String putBytes(String key, byte[] bytes, String contentType) {
         s3.putObject(
                 PutObjectRequest.builder()
-                        .bucket(props.getAwsS3Bucket())
+                        .bucket(getBucketName())
                         .key(key)
                         .contentType(contentType)
                         .build(),
@@ -111,7 +135,7 @@ public class S3Service {
     public byte[] getBytes(String key) {
         try (ResponseInputStream<GetObjectResponse> in = s3.getObject(
                 GetObjectRequest.builder()
-                        .bucket(props.getAwsS3Bucket())
+                        .bucket(getBucketName())
                         .key(key)
                         .build())) {
             return in.readAllBytes();
@@ -120,11 +144,9 @@ public class S3Service {
         }
     }
 
-    /* -------------------- Presign (GET) -------------------- */
-
     public URL presignGet(String key, Duration ttl) {
         var req = GetObjectRequest.builder()
-                .bucket(props.getAwsS3Bucket())
+                .bucket(getBucketName())
                 .key(key)
                 .build();
         var presigned = presigner.presignGetObject(
@@ -135,7 +157,6 @@ public class S3Service {
         return presigned.url();
     }
 
-    /** Returns presigned URLs for standard artifacts if they exist. */
     public Map<String, URL> listStandardArtifactUrls(String artifactsPrefix, Duration ttl) {
         Map<String, URL> out = new LinkedHashMap<>();
         String[] names = {"metrics.json", "tests.csv", "confusion_matrix.png", "logs.txt"};
@@ -148,12 +169,9 @@ public class S3Service {
         return out;
     }
 
-    /* -------------------- Listing & cleanup -------------------- */
-
-    /** List all object keys under a prefix. */
     public List<String> listKeys(String prefix) {
         var req = ListObjectsV2Request.builder()
-                .bucket(props.getAwsS3Bucket())
+                .bucket(getBucketName())
                 .prefix(prefix)
                 .build();
         var out = new ArrayList<String>();
@@ -167,10 +185,9 @@ public class S3Service {
         return out;
     }
 
-    /** True if any object exists under the prefix. */
     public boolean existsPrefix(String prefix) {
         var resp = s3.listObjectsV2(ListObjectsV2Request.builder()
-                .bucket(props.getAwsS3Bucket())
+                .bucket(getBucketName())
                 .prefix(prefix)
                 .maxKeys(1)
                 .build());
@@ -178,14 +195,13 @@ public class S3Service {
         return kc != null && kc > 0;
     }
 
-    /** Delete all objects under a prefix (chunked by 1000). */
     public void deletePrefix(String prefix) {
         var keys = listKeys(prefix);
         if (keys.isEmpty()) return;
         for (int i = 0; i < keys.size(); i += 1000) {
             var slice = keys.subList(i, Math.min(i + 1000, keys.size()));
             var del = DeleteObjectsRequest.builder()
-                    .bucket(props.getAwsS3Bucket())
+                    .bucket(getBucketName())
                     .delete(Delete.builder()
                             .objects(slice.stream()
                                     .map(k -> ObjectIdentifier.builder().key(k).build())
