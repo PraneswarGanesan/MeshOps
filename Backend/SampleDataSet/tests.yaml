@@ -1,0 +1,35 @@
+tests:
+  scenarios:
+    - name: auto_case_1
+      input: { image_path: "images/val/cats/cat_val1.jpg" }
+      expected: { prediction: "cat" }
+    - name: auto_case_2
+      input: { image_path: "images/val/dogs/dog_val1.jpg" }
+      expected: { prediction: "dog" }
+    - name: auto_case_3
+      input: { image_path: "images/val/cats/cat_val2.jpg" }
+      expected: { prediction: "cat" }
+    - name: auto_case_4
+      input: { image_path: "images/val/dogs/dog_val2.jpg" }
+      expected: { prediction: "dog" }
+    - name: auto_case_5
+      input: { image_path: "images/val/cats/cat_val3.jpg" }
+      expected: { prediction: "cat" }
+    - name: auto_case_6
+      input: { image_path: "images/val/dogs/dog_val3.jpg" }
+      expected: { prediction: "dog" }
+    - name: negative_case_1
+      input: { image_path: "images/val/cats/invalid_image.jpg" }
+      expected: { error: "Image not found or invalid format" }
+    - name: negative_case_2
+      input: { image_path: "invalid_path/image.jpg" }
+      expected: { error: "Image not found or invalid format" }
+    - name: negative_case_3
+      input: { image_path: "" }
+      expected: { error: "Image path cannot be empty" }
+    - name: negative_case_4
+      input: { image_path: 123 }
+      expected: { error: "Invalid image path type" }
+    - name: negative_case_5
+      input: { image_path: "images/val/cats/cat_val1.txt" }
+      expected: { error: "Image not found or invalid format" }

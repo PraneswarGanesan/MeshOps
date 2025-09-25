@@ -10,4 +10,12 @@ import java.util.List;
 public interface ScenarioPromptRepository extends JpaRepository<ScenarioPrompt, Long> {
 
     List<ScenarioPrompt> findByUsernameAndProjectNameOrderByCreatedAtDesc(String username, String projectName);
+
+    List<ScenarioPrompt> findByUsernameAndProjectNameAndVersionLabelOrderByCreatedAtDesc(
+            String username, String projectName, String versionLabel
+    );
+
+    void deleteByUsernameAndProjectNameAndVersionLabel(
+            String username, String projectName, String versionLabel
+    );
 }

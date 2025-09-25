@@ -4,16 +4,22 @@ package com.mesh.behaviour.behaviour.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mesh.behaviour.behaviour.util.S3KeyUtil;
+import io.netty.channel.ChannelOption;
+import io.netty.handler.timeout.ReadTimeoutHandler;
+import io.netty.handler.timeout.WriteTimeoutHandler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
+import reactor.netty.http.client.HttpClient;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -24,7 +30,17 @@ import java.util.regex.Pattern;
 public class LlmService {
 
     private final S3Service s3;
-    private final WebClient webClient = WebClient.builder().build();
+    private final WebClient webClient = WebClient.builder()
+            .clientConnector(new ReactorClientHttpConnector(
+                    HttpClient.create()
+                            .responseTimeout(Duration.ofMinutes(5))                // overall response timeout
+                            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)   // connect timeout
+                            .doOnConnected(conn ->
+                                    conn.addHandlerLast(new ReadTimeoutHandler(300))   // 5 min read
+                                            .addHandlerLast(new WriteTimeoutHandler(300))  // 5 min write
+                            )
+            ))
+            .build();
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Value("${llm.gemini.apiKey}")
@@ -33,17 +49,22 @@ public class LlmService {
     @Value("${llm.gemini.url}")
     private String url;
 
-    /**
-     * === NEW METHOD ===
-     * Generate ONLY tests.yaml, save to S3, return the versionKey.
-     */
+    /* ================= TESTS ONLY ================= */
+
     public Map<String, String> generateTestsOnlyToS3(String brief,
                                                      String context,
                                                      String baseKey,
                                                      String label) {
         requireKeys();
-        String prompt = buildTestsOnlyPrompt(brief, context);
-        log.info("=== [LLM] Prompt for tests.yaml ===\n{}", prompt);
+
+        String root = deriveProjectRootFromAnyKey(baseKey);
+        String versionBase = resolveVersionBaseKey(root, label);
+
+        // always rebuild augmented context
+        String augmentedContext = buildS3AugmentedContext(root, versionBase);
+
+        String prompt = buildTestsOnlyPrompt(brief, augmentedContext);
+        log.info("=== [LLM] Prompt for tests.yaml (len={}) ===\n{}", prompt.length(), prompt);
 
         String geminiResp = callGemini(prompt).block();
         if (!StringUtils.hasText(geminiResp)) {
@@ -53,7 +74,15 @@ public class LlmService {
         String combined = extractAllTextFromGemini(geminiResp);
         log.info("=== [LLM] Raw Gemini Response ===\n{}", combined);
 
+        // Try fenced YAML first
         String tests = firstGroup("(?s)```(?:yaml|yml)\\s+(.*?)\\s*```", combined);
+
+        // If no fenced block, but raw starts with tests:, accept directly
+        if (!StringUtils.hasText(tests) && combined.trim().startsWith("tests:")) {
+            tests = combined.trim();
+        }
+
+        // If still empty, fallback
         if (!StringUtils.hasText(tests)) {
             tests = "tests:\n  - name: fallback\n    run: echo 'LLM failed to generate tests.yaml'\n";
         }
@@ -61,15 +90,12 @@ public class LlmService {
         String versionKey = S3KeyUtil.join(baseKey, label + ".yaml");
         s3.putString(versionKey, cleanBlock(tests), "text/yaml");
 
-        log.info("=== [LLM] tests.yaml saved to {} ===\n{}", versionKey, tests);
-
         return Map.of("versionKey", versionKey);
     }
 
-    /**
-     * === NEW METHOD ===
-     * Adaptive generation of driver.py (and optionally tests.yaml).
-     */
+
+    /* ================= DRIVER + TESTS ================= */
+
     public Map<String, String> generateDriverUsingAdaptivePrompt(String brief,
                                                                  String context,
                                                                  String baseKey,
@@ -131,9 +157,6 @@ USER BRIEF:
         return out;
     }
 
-    /**
-     * Generate driver.py + tests.yaml for a version folder.
-     */
     public Mono<Map<String, String>> generateDriverForVersion(
             String brief, String baseKey, String versionPrefix
     ) {
@@ -141,11 +164,11 @@ USER BRIEF:
         if (!StringUtils.hasText(baseKey)) throw new IllegalArgumentException("baseKey required");
         if (!StringUtils.hasText(versionPrefix)) throw new IllegalArgumentException("versionPrefix required");
 
-        String normalizedBaseKey = normalizeBaseKey(baseKey);
+        String root = normalizeBaseKey(baseKey); // root: {username}/{project}
         String vp = versionPrefix.endsWith("/") ? versionPrefix : versionPrefix + "/";
-        String versionBaseKey = S3KeyUtil.join(normalizedBaseKey, vp);
+        String versionBaseKey = S3KeyUtil.join(root, "artifacts/versions/", vp);
 
-        String augmentedContext = buildS3AugmentedContext(versionBaseKey);
+        String augmentedContext = buildS3AugmentedContext(root, versionBaseKey);
         String prompt = buildDriverAndTestsPrompt(augmentedContext, brief);
 
         log.info("=== [LLM] Final Prompt Sent to Gemini ===\n{}", prompt);
@@ -169,15 +192,23 @@ CONTEXT:
 
 RULES:
 - Output ONLY YAML (no markdown fences, no prose).
-- YAML must start with "tests:".
-- Must include "scenarios:".
-- Ensure it is schema-valid and realistic.
+- YAML must start with "tests:" and then "scenarios:".
+- Each scenario must include:
+    - name
+    - input (must be EXACTLY one of the dataset file paths listed in CONTEXT, 
+             but REMOVE the leading "pre-processed/". 
+             Example: if context shows "pre-processed/images/train/cats/cat-1.jpg", 
+             the input should be "images/train/cats/cat-1.jpg").
+    - expected (ground truth label).
+- You MUST use every distinct file path from CONTEXT at least once.
+- If more scenarios are required than the number of files available, REUSE existing files (e.g., the same file can appear in both a PASS and a FAIL case).
+- Do NOT fabricate new file names (e.g., "dog-4.jpg" or "cat-10.png").
+- Ensure YAML schema validity.
 
 USER BRIEF:
 %s
 """, context == null ? "" : context, brief == null ? "" : brief);
     }
-
     private String buildDriverAndTestsPrompt(String ctx, String brief) {
         return String.format("""
 You are generating a behaviour-testing kit for a user's ML project.
@@ -189,10 +220,50 @@ Return exactly TWO fenced blocks:
 %s
 ========= END CONTEXT ===========
 
-Rules:
-- driver.py must import and use train.py/predict.py if they exist.
-- If model.pkl or HuggingFace model exists, load it for prediction.
-- Must print EXACT lines:
+Rules for driver.py:
+- Output MUST be complete Python code (no stubs, no pseudocode).
+- Must import: torch, torchvision, sklearn, yaml, pandas, matplotlib, PIL.Image, csv, json, joblib, subprocess, argparse, sys, os.
+- Must accept a --base_dir argument via argparse.
+- Normalize dataset root:
+  * If "pre-processed/" exists under base_dir, use it.
+  * Else use base_dir directly.
+- Model handling:
+  * If model.pt exists: load torchvision ResNet18 (fc = 2 classes), define transform + idx_to_class.
+  * If model.pkl exists: load with joblib, define preprocessing steps (tabular or text).
+  * Else: AUTO-TRAIN by running `train.py` located inside the **pre-processed/** directory:
+      - Run as subprocess: `python3 <base_dir>/pre-processed/train.py --base_dir <base_dir>/pre-processed`.
+      - After it completes, ensure model.pt or model.pkl now exists.
+      - If still missing, exit with error.
+  * ALWAYS define transform and idx_to_class if image model is used, even when loading existing model.
+- Tests execution:
+  * Parse tests.yaml. Accept both styles safely:
+      scenarios = tests.get("scenarios", tests.get("tests", {}).get("scenarios", []))
+  * For each scenario:
+      - Initialize `prediction = None` at the start of the loop.
+      - If a "function" key exists:
+          - load_data → PASS if directory exists and is non-empty, else FAIL.
+          - train_model → trigger subprocess call to train.py again; PASS if model file created.
+          - predict → run inference, compare predicted vs expected, collect y_true and y_pred.
+      - Else (no "function" key, only input/expected):
+          - Treat as a predict test. Run inference and compare expected vs predicted.
+      - Append results to tests.csv with columns: name,category,severity,expected,predicted,result.
+      - `predicted` column must be the actual prediction (or null if not applicable).
+      - Result must be PASS or FAIL.
+- Metrics:
+  * Collect y_true and y_pred dynamically from predict-type scenarios.
+  * accuracy = accuracy_score(y_true, y_pred)
+  * precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
+  * recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
+  * f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
+  * Save confusion_matrix.png, metrics.json.
+- Artifacts to produce in base_dir:
+  * tests.csv
+  * metrics.json
+  * confusion_matrix.png
+  * logs.txt
+  * manifest.json (list all generated files + metadata)
+  * refiner_hints.json (suggest improvements if failures occur)
+- Print EXACT lines:
     Model trained and saved to: <path>
     Predictions generated.
     Evaluation metrics:
@@ -200,87 +271,274 @@ Rules:
     Precision: <float>
     Recall: <float>
     F1-score: <float>
-- tests.yaml must have tests: and scenarios:.
-- If images/val/* exist, create scenarios for each class.
-- If dataset.csv exists, assume tabular classification/regression.
+- Code must never reference "pre-processed" explicitly in scenario paths.
+- Do NOT invent file paths. Use only those listed in CONTEXT.
+
+Rules for tests.yaml:
+- Output ONLY YAML (no markdown fences).
+- Must start with "tests:" and then "scenarios:".
+- At least 3 scenarios:
+    * One function-based test (load_data or train_model).
+    * One predict test with correct expected label.
+    * One negative/FAIL case for robustness.
+- Each scenario includes:
+    - name
+    - function (optional: load_data, train_model, predict) OR input/expected directly.
+    - input (relative path; null allowed for train_model).
+    - expected (non_empty, model_saved, or class label).
+- Never fabricate non-existent files.
+- Schema must be valid YAML.
 
 USER BRIEF:
 %s
 """, ctx == null ? "" : ctx, brief == null ? "" : brief);
     }
 
+
     /* ================= CONTEXT BUILDER ================= */
 
-    private String buildS3AugmentedContext(String versionBaseKey) {
+    private String buildS3AugmentedContext(String root, String versionBase) {
         StringBuilder sb = new StringBuilder();
-        for (String f : new String[]{"train.py", "predict.py", "dataset.csv", "model.pkl"}) {
-            String key = S3KeyUtil.join(versionBaseKey, f);
+
+        // existing small snippets for train.py, predict.py, dataset.csv
+        String pre = S3KeyUtil.join(root, "pre-processed/");
+
+        for (String rel : new String[]{"train.py", "predict.py", "dataset.csv"}) {
+            String key = S3KeyUtil.join(pre, rel);
             boolean exists = s3.exists(key);
-            sb.append("[file] ").append(f).append(" : ").append(exists ? "PRESENT" : "MISSING").append("\n");
-            if (exists && (f.endsWith(".py") || f.endsWith(".csv"))) {
+            sb.append("[file] pre-processed/").append(rel).append(" ")
+                    .append(exists ? "PRESENT" : "MISSING").append("\n");
+            if (exists) {
                 try {
                     String snippet = s3.getStringSafe(key, 8000, 100);
-                    sb.append("---- BEGIN SNIPPET: ").append(f).append(" ----\n");
+                    sb.append("---- BEGIN SNIPPET: ").append(rel).append(" ----\n");
                     sb.append(snippet).append("\n");
-                    sb.append("---- END SNIPPET: ").append(f).append(" ----\n");
+                    sb.append("---- END SNIPPET: ").append(rel).append(" ----\n");
+
+                    // ✅ If it's dataset.csv, extract and show column names
+                    if ("dataset.csv".equals(rel)) {
+                        String[] lines = snippet.split("\n");
+                        if (lines.length > 0) {
+                            String[] cols = lines[0].split(",");
+                            sb.append("[columns] dataset.csv -> ").append(String.join(",", cols)).append("\n");
+                        }
+                    }
                 } catch (Exception e) {
-                    log.warn("Failed to fetch snippet for {}", key, e);
+                    log.warn("Failed snippet {}", key, e);
                 }
             }
         }
-        String hfPrefix = S3KeyUtil.join(versionBaseKey, "hf_model/");
-        sb.append("[dir] hf_model : ").append(s3.existsPrefix(hfPrefix) ? "PRESENT" : "MISSING").append("\n");
-        for (String prefix : new String[]{
-                S3KeyUtil.join(versionBaseKey, "images/train/"),
-                S3KeyUtil.join(versionBaseKey, "images/val/")}) {
-            if (s3.existsPrefix(prefix)) {
-                sb.append("[dir] ").append(prefix).append(" PRESENT\n");
-                List<String> keys = s3.listKeys(prefix);
+
+        // model files notice
+        String modelPklKey = S3KeyUtil.join(versionBase, "model.pkl");
+        String modelPtKey = S3KeyUtil.join(versionBase, "model.pt");
+        boolean hasPkl = s3.exists(modelPklKey);
+        boolean hasPt = s3.exists(modelPtKey);
+
+        sb.append("\n=== MODEL FILES IN VERSION FOLDER ===\n");
+        sb.append("[model] model.pkl ").append(hasPkl ? "PRESENT" : "MISSING").append("\n");
+        sb.append("[model] model.pt ").append(hasPt ? "PRESENT" : "MISSING").append("\n");
+        sb.append(hasPkl || hasPt ? "*** EXISTING MODEL DETECTED - Driver must load/continue ***\n"
+                : "*** NO EXISTING MODEL - Driver must train new model from scratch ***\n");
+
+        // Append detailed listing for images and texts (train & val)
+        sb.append("\n").append(buildS3FileListingContext(root));
+
+        // ✅ Add explicit listing for texts/train and texts/val
+        for (String txtDir : new String[]{"texts/train/", "texts/val/"}) {
+            String prefix = S3KeyUtil.join(pre, txtDir);
+            boolean present = s3.existsPrefix(prefix);
+            sb.append("[dir] pre-processed/").append(txtDir).append(" : ").append(present ? "PRESENT" : "MISSING").append("\n");
+            if (present) {
+                int limit = 50;
+                List<String> keys = new ArrayList<>(s3.listKeys(prefix));
+                int shown = 0;
+                for (String k : keys) {
+                    if (!k.endsWith("/") && shown < limit) {
+                        sb.append("  - ").append(k.substring(prefix.length())).append("\n");
+                        shown++;
+                    }
+                }
+                if (keys.size() > limit) sb.append("  ... (").append(keys.size() - limit).append(" more files)\n");
+            }
+        }
+
+        // versionBase model presence summary too
+        if (StringUtils.hasText(versionBase)) {
+            String versionLabel = versionBase.contains("/v") ? versionBase.substring(versionBase.indexOf("/v")) : versionBase;
+            String modelKey = S3KeyUtil.join(versionBase, "model.pkl");
+            sb.append("\n[file] artifacts/versions/").append(versionLabel).append("/model.pkl ")
+                    .append(s3.exists(modelKey) ? "PRESENT" : "MISSING").append("\n");
+        }
+
+        return sb.toString();
+    }
+
+    private String buildS3FileListingContext(String root) {
+        StringBuilder sb = new StringBuilder();
+        String pre = S3KeyUtil.join(root, "pre-processed/");
+
+        // list images train/val with sample files and class names
+        for (String imgDir : new String[]{"images/train/", "images/val/"}) {
+            String prefix = S3KeyUtil.join(pre, imgDir);
+            boolean present = s3.existsPrefix(prefix);
+            sb.append("[dir] pre-processed/").append(imgDir).append(" : ").append(present ? "PRESENT" : "MISSING").append("\n");
+            if (present) {
+                // collect up to N files and class names
+                int limit = 50;
+                List<String> keys = new ArrayList<>(s3.listKeys(prefix));
+                int shown = 0;
+                // infer classes by first path segment
                 Set<String> classes = new TreeSet<>();
                 for (String k : keys) {
                     String rest = k.startsWith(prefix) ? k.substring(prefix.length()) : k;
                     String[] parts = rest.split("/");
                     if (parts.length > 0 && parts[0].length() > 0) classes.add(parts[0]);
+                    if (!k.endsWith("/") && shown < limit) {
+                        sb.append("  - ").append(rest).append("\n");
+                        shown++;
+                    }
                 }
-                if (!classes.isEmpty()) {
-                    sb.append("[classes] ").append(String.join(",", classes)).append("\n");
+                if (!classes.isEmpty()) sb.append("[classes] ").append(String.join(",", classes)).append("\n");
+                if (keys.size() > limit) sb.append("  ... (").append(keys.size()-limit).append(" more files)\n");
+            }
+        }
+
+        // ✅ texts listing broken into train/val (just like images)
+        for (String txtDir : new String[]{"texts/train/", "texts/val/"}) {
+            String prefix = S3KeyUtil.join(pre, txtDir);
+            boolean present = s3.existsPrefix(prefix);
+            sb.append("[dir] pre-processed/").append(txtDir).append(" : ").append(present ? "PRESENT" : "MISSING").append("\n");
+            if (present) {
+                int limit = 50;
+                List<String> keys = new ArrayList<>(s3.listKeys(prefix));
+                int shown = 0;
+                for (String k : keys) {
+                    if (!k.endsWith("/") && shown < limit) {
+                        sb.append("  - ").append(k.substring(prefix.length())).append("\n");
+                        shown++;
+                    }
                 }
-            } else {
-                sb.append("[dir] ").append(prefix).append(" MISSING\n");
+                if (keys.size() > limit) sb.append("  ... (").append(keys.size()-limit).append(" more files)\n");
+            }
+        }
+
+        // dataset.csv presence + column names
+        String csvKey = S3KeyUtil.join(pre, "dataset.csv");
+        boolean csvExists = s3.exists(csvKey);
+        sb.append("[file] pre-processed/dataset.csv : ").append(csvExists ? "PRESENT" : "MISSING").append("\n");
+        if (csvExists) {
+            try {
+                String snippet = s3.getStringSafe(csvKey, 8000, 100);
+                String[] lines = snippet.split("\n");
+                if (lines.length > 0) {
+                    String[] cols = lines[0].split(",");
+                    sb.append("[columns] dataset.csv -> ").append(String.join(",", cols)).append("\n");
+                }
+            } catch (Exception e) {
+                log.warn("Failed to extract columns from {}", csvKey, e);
+            }
+        }
+
+        return sb.toString();
+    }
+
+
+
+    private String buildPreprocessedContext(String root) {
+        String pre = S3KeyUtil.join(root, "pre-processed/");
+        StringBuilder sb = new StringBuilder();
+        for (String rel : new String[]{"train.py", "predict.py", "dataset.csv", "images/", "texts/"}) {
+            String key = S3KeyUtil.join(pre, rel);
+            boolean exists = s3.exists(key) || s3.existsPrefix(key);
+            sb.append("[pre] ").append(rel).append(" : ").append(exists ? "PRESENT" : "MISSING").append("\n");
+            if (exists && (rel.endsWith(".py") || rel.endsWith(".csv"))) {
+                try {
+                    String snippet = s3.getStringSafe(key, 8000, 100);
+                    sb.append("---- BEGIN SNIPPET: ").append(rel).append(" ----\n");
+                    sb.append(snippet).append("\n");
+                    sb.append("---- END SNIPPET: ").append(rel).append(" ----\n");
+                } catch (Exception ignored) {}
             }
         }
         return sb.toString();
     }
+    private String deriveProjectRootFromAnyKey(String maybeVersionOrRoot) {
+        if (!StringUtils.hasText(maybeVersionOrRoot)) throw new IllegalArgumentException("Missing key");
+        String s = maybeVersionOrRoot.trim();
+        if (s.startsWith("s3://")) s = S3KeyUtil.keyOf(s);
+        // if the key includes artifacts/versions/... strip from there
+        int idx = s.indexOf("/artifacts/versions/");
+        if (idx >= 0) return s.substring(0, idx);
+        // if it's already v-base like .../v1/ then try to find "/v" and strip
+        idx = s.indexOf("/v");
+        if (idx >= 0) return s.substring(0, idx);
+        // otherwise assume provided is root
+        return s;
+    }
+
 
     /* ================= GEMINI CALL ================= */
 
     private Mono<String> callGemini(String prompt) {
         String finalUrl = url + apiKey;
         Map<String, Object> body = Map.of("contents", List.of(Map.of("parts", List.of(Map.of("text", prompt)))));
+        try {
+            String bodyJson = mapper.writeValueAsString(body);
+            log.debug("[LLM] POST {} with body: {}", finalUrl, bodyJson);
+        } catch (Exception ignored) {}
+
         return webClient.post().uri(finalUrl)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .retrieve()
-                .bodyToMono(String.class);
+                .bodyToMono(String.class)
+                .doOnError(e -> log.warn("Gemini call failed: {}", e.getMessage()));
     }
+
 
     /* ================= PARSE & SAVE ================= */
 
+    /* ================= PARSE & SAVE ================= */
     private Map<String, String> parseAndSave(String geminiJson, String baseKey) {
         String combined = extractAllTextFromGemini(geminiJson);
+
+        // Extract code blocks
         String driver = firstGroup("(?s)```(?:python|py)\\s+(.*?)\\s*```", combined);
         String tests  = firstGroup("(?s)```(?:yaml|yml)\\s+(.*?)\\s*```", combined);
-        if (!StringUtils.hasText(driver)) driver = "#!/usr/bin/env python3\nprint('LLM failed to generate driver.py')";
-        if (!StringUtils.hasText(tests)) tests = "tests:\n  - name: placeholder\n    run: echo 'LLM failed to generate tests.yaml'\n";
+
+        // If missing, fallback but also mark as incomplete
+        boolean driverIncomplete = false;
+        if (!StringUtils.hasText(driver)) {
+            driver = "#!/usr/bin/env python3\nprint('LLM failed to generate driver.py')";
+            driverIncomplete = true;
+        }
+
+        boolean testsIncomplete = false;
+        if (!StringUtils.hasText(tests)) {
+            tests = "tests:\n  scenarios:\n    - name: placeholder\n      input: ''\n      expected: ''\n";
+            testsIncomplete = true;
+        }
 
         String driverKey = S3KeyUtil.join(baseKey, "driver.py");
         String testsKey  = S3KeyUtil.join(baseKey, "tests.yaml");
 
-        s3.putString(driverKey, cleanBlock(driver), "text/x-python");
-        s3.putString(testsKey, cleanBlock(tests), "text/yaml");
+        // Always overwrite if file missing OR previous one contained placeholders
+        if (!s3.exists(driverKey) || s3.getString(driverKey).contains("LLM failed")) {
+            s3.putString(driverKey, cleanBlock(driver), "text/x-python");
+        } else if (!driverIncomplete) {
+            s3.putString(driverKey, cleanBlock(driver), "text/x-python");
+        }
+
+        if (!s3.exists(testsKey) || s3.getString(testsKey).contains("placeholder")) {
+            s3.putString(testsKey, cleanBlock(tests), "text/yaml");
+        } else if (!testsIncomplete) {
+            s3.putString(testsKey, cleanBlock(tests), "text/yaml");
+        }
 
         return Map.of("driverKey", driverKey, "testsKey", testsKey);
     }
+
 
     /* ================= HELPERS ================= */
 
@@ -293,9 +551,9 @@ USER BRIEF:
     private String normalizeBaseKey(String s3PrefixOrKey) {
         if (!StringUtils.hasText(s3PrefixOrKey)) throw new IllegalArgumentException("Missing s3Prefix");
         String in = s3PrefixOrKey.trim();
-        if (in.startsWith("s3://")) return S3KeyUtil.keyOf(in);
+        if (in.startsWith("s3://")) in = S3KeyUtil.keyOf(in);
         while (in.startsWith("/")) in = in.substring(1);
-        while (in.endsWith("/")) in = in.substring(0, in.length() - 1);
+        while (in.endsWith("/") && in.length() > 1) in = in.substring(0, in.length() - 1);
         return in;
     }
 
@@ -319,9 +577,7 @@ USER BRIEF:
                 }
             }
             return sb.toString();
-        } catch (Exception e) {
-            return geminiJson;
-        }
+        } catch (Exception e) { return geminiJson; }
     }
 
     private String firstGroup(String regex, String src) {
@@ -336,5 +592,108 @@ USER BRIEF:
                 .replaceAll("(?s)\\s*```\\s*$", "")
                 .trim();
         return new String(s.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
+    }
+
+    /* ================= VERSIONING ================= */
+
+    public String resolveVersionBaseKey(String projectRootKey, String versionLabel) {
+        String root = normalizeBaseKey(projectRootKey);
+        String v = (versionLabel == null ? "" : versionLabel.trim().replaceAll("^/+|/+$", ""));
+        if (v.isEmpty()) throw new IllegalArgumentException("versionLabel required");
+        return S3KeyUtil.join(root, "artifacts/versions/" + v + "/");
+    }
+
+    public String findPreviousVersion(String projectRootKey, String versionLabel) {
+        try {
+            String v = versionLabel == null ? "" : versionLabel.trim();
+            if (!v.matches("v\\d+")) return null;
+            int n = Integer.parseInt(v.substring(1));
+            if (n <= 0) return null;
+            String prev = "v" + (n - 1);
+            String prevKey = resolveVersionBaseKey(projectRootKey, prev);
+            return s3.existsPrefix(prevKey) ? prevKey : null;
+        } catch (Exception e) { return null; }
+    }
+
+    public boolean hasPreprocessedChanges(String projectRootKey, String lastVersionBaseKey) {
+        String root = normalizeBaseKey(projectRootKey);
+        String pre = S3KeyUtil.join(root, "pre-processed/");
+
+        boolean datasetChanged = false;
+        try {
+            String curCsv = S3KeyUtil.join(pre, "dataset.csv");
+            String prevCsv = S3KeyUtil.join(lastVersionBaseKey, "dataset.csv");
+            if (s3.exists(curCsv) && s3.exists(prevCsv)) {
+                datasetChanged = !md5(s3.getBytes(curCsv)).equals(md5(s3.getBytes(prevCsv)));
+            }
+        } catch (Exception ignored) {}
+
+        boolean imagesChanged = false;
+        try {
+            imagesChanged = countUnderPrefix(S3KeyUtil.join(pre, "images/")) !=
+                    countUnderPrefix(S3KeyUtil.join(lastVersionBaseKey, "images/"));
+        } catch (Exception ignored) {}
+
+        boolean textsChanged = false;
+        try {
+            textsChanged = countUnderPrefix(S3KeyUtil.join(pre, "texts/")) !=
+                    countUnderPrefix(S3KeyUtil.join(lastVersionBaseKey, "texts/"));
+        } catch (Exception ignored) {}
+
+        return datasetChanged || imagesChanged || textsChanged;
+    }
+
+    public Map<String, String> ensureDriverForNewVersion(String projectRootKey, String versionLabel) {
+        String vBase = resolveVersionBaseKey(projectRootKey, versionLabel);
+        String root = normalizeBaseKey(projectRootKey);
+        String driverKey = S3KeyUtil.join(vBase, "driver.py");
+        String testsKey = S3KeyUtil.join(vBase, "tests.yaml");
+
+        if ("v0".equalsIgnoreCase(versionLabel)) {
+            String ctx = buildPreprocessedContext(root);
+            String prompt = buildDriverAndTestsPrompt(ctx, "Initial version v0.");
+            String resp = callGemini(prompt).block();
+
+            // Always overwrite if placeholder driver exists
+            if (!s3.exists(driverKey) || s3.getString(driverKey).contains("LLM failed")) {
+                return parseAndSave(resp, vBase);
+            }
+        }
+
+
+        String prevBase = findPreviousVersion(root, versionLabel);
+        if (!s3.exists(driverKey) && prevBase != null) {
+            String prevDriver = S3KeyUtil.join(prevBase, "driver.py");
+            if (s3.exists(prevDriver)) s3.copy(prevDriver, driverKey);
+        }
+
+        if (prevBase != null && hasPreprocessedChanges(root, prevBase)) {
+            String ctx = buildS3AugmentedContext(root, vBase);
+            String prompt = buildDriverAndTestsPrompt(ctx, "Changes detected since previous version.");
+            String resp = callGemini(prompt).block();
+            parseAndSave(resp, vBase);
+        } else if (!s3.exists(testsKey)) {
+            String ctx = buildS3AugmentedContext(root, vBase);
+            Map<String, String> m = generateTestsOnlyToS3("Generate behaviour tests.", ctx, vBase, "tests");
+            String vKey = m.get("versionKey");
+            if (vKey != null && !vKey.equals(testsKey)) s3.copy(vKey, testsKey);
+        }
+
+        return Map.of("driverKey", driverKey, "testsKey", testsKey);
+    }
+
+    private int countUnderPrefix(String prefix) {
+        try { return (int) s3.listKeys(prefix).stream().filter(k -> !k.endsWith("/")).count(); }
+        catch (Exception e) { return 0; }
+    }
+
+    private String md5(byte[] data) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] dig = md.digest(data);
+            StringBuilder sb = new StringBuilder();
+            for (byte b : dig) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) { return ""; }
     }
 }

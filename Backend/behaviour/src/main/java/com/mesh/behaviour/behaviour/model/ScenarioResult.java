@@ -16,8 +16,10 @@ public class ScenarioResult {
     private Long id;
 
     private String username;
-
     private String projectName;
+
+    // 🔹 OPTIONAL: add versionLabel if you want results per version
+    private String versionLabel;
 
     private Long runId;   // link to the run
 

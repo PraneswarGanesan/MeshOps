@@ -1,28 +1,26 @@
-// src/main/java/com/mesh/behaviour/behaviour/controller/RefinerController.java
+// src/main/java/com/mesh/behaviour/behaviour/controller/UnitTestController.java
 package com.mesh.behaviour.behaviour.controller;
 
-import com.mesh.behaviour.behaviour.service.RefinerService;
+import com.mesh.behaviour.behaviour.service.UnitTestService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 
 @RestController
-@RequestMapping("/api/refiner")
+@RequestMapping("/api/unit-tests")
 @RequiredArgsConstructor
 @CrossOrigin(origins = "*", allowedHeaders = "*", methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.OPTIONS})
-public class RefinerController {
+public class UnitTestController {
 
-    private final RefinerService refinerService;
+    private final UnitTestService unitTestService;
 
     /**
-     * Frontend expects:
-     * POST /api/refiner/{username}/{projectName}/{versionLabel}/refine?runId=NN&autoRun=true
+     * POST /api/unit-tests/{username}/{projectName}/{versionLabel}/refine?runId=NN&autoRun=true
      * Body: { "userFeedback": "text..." }  // optional
-     * Returns: { versionKey, canonicalKey, activated, newRunId? }
      */
     @PostMapping("/{username}/{projectName}/{versionLabel}/refine")
-    public Map<String, Object> refineAndActivate(
+    public Map<String, Object> refineAndActivateUnit(
             @PathVariable String username,
             @PathVariable String projectName,
             @PathVariable String versionLabel,
@@ -34,6 +32,6 @@ public class RefinerController {
         if (body != null && body.get("userFeedback") != null) {
             feedback = String.valueOf(body.get("userFeedback"));
         }
-        return refinerService.refineAndActivateTests(username, projectName, versionLabel, runId, feedback, autoRun);
+        return unitTestService.refineAndActivateUnitTests(username, projectName, versionLabel, runId, feedback, autoRun);
     }
 }

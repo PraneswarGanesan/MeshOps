@@ -12,42 +12,32 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Stores and retrieves chat-style scenario prompts (user feedback) per project.
- * Also builds a compact chat history string for LLM prompts.
- *
- * Improvements:
- *  - Max message length enforcement
- *  - Optional 'source' (user/system) stored as a short prefix in the message (no DB schema change)
- *  - Richer chat history formatting (includes runId and relative age, still compact)
- */
 @Service
 @RequiredArgsConstructor
 public class ScenarioService {
 
     private final ScenarioPromptRepository repo;
 
-    // sane cap for each prompt to protect DB & LLM tokens
     private static final int MAX_MESSAGE_CHARS = 2000;
 
-    /**
-     * Save a user prompt. runId may be null.
-     */
-    public ScenarioPrompt savePrompt(String username, String projectName, String message, Long runId) {
-        return savePromptInternal(username, projectName, message, runId, "user");
+    /** Save a user prompt. runId may be null. */
+    public ScenarioPrompt savePrompt(String username, String projectName, String versionLabel, String message, Long runId) {
+        if (!StringUtils.hasText(versionLabel)) {
+            throw new IllegalArgumentException("versionLabel is required - ScenarioService cannot create versions");
+        }
+        return savePromptInternal(username, projectName, versionLabel, message, runId, "user");
     }
 
-    /**
-     * Save a system prompt (automated hint from platform).
-     */
-    public ScenarioPrompt saveSystemPrompt(String username, String projectName, String message, Long runId) {
-        return savePromptInternal(username, projectName, message, runId, "system");
+    /** Save a system prompt (automated hint from platform). */
+    public ScenarioPrompt saveSystemPrompt(String username, String projectName, String versionLabel, String message, Long runId) {
+        if (!StringUtils.hasText(versionLabel)) {
+            throw new IllegalArgumentException("versionLabel is required - ScenarioService cannot create versions");
+        }
+        return savePromptInternal(username, projectName, versionLabel, message, runId, "system");
     }
 
-    /**
-     * Internal saver that tags message with a short role prefix (avoids DB schema change).
-     */
-    private ScenarioPrompt savePromptInternal(String username, String projectName, String message, Long runId, String role) {
+    private ScenarioPrompt savePromptInternal(String username, String projectName, String versionLabel,
+                                              String message, Long runId, String role) {
         if (!StringUtils.hasText(username) || !StringUtils.hasText(projectName) || !StringUtils.hasText(message)) {
             throw new IllegalArgumentException("username, projectName and message are required");
         }
@@ -57,12 +47,12 @@ public class ScenarioService {
             trimmed = trimmed.substring(0, MAX_MESSAGE_CHARS - 16) + " ...[truncated]";
         }
 
-        // store short role prefix in message to avoid DB migration while keeping role metadata
         String storeMessage = "[" + role + "] " + trimmed;
 
         ScenarioPrompt sp = ScenarioPrompt.builder()
                 .username(username.trim())
                 .projectName(projectName.trim())
+                .versionLabel(versionLabel.trim())
                 .message(storeMessage)
                 .runId(runId)
                 .createdAt(new Timestamp(System.currentTimeMillis()))
@@ -70,33 +60,34 @@ public class ScenarioService {
         return repo.save(sp);
     }
 
-    /** All prompts for a project, newest first. */
-    public List<ScenarioPrompt> listPrompts(String username, String projectName) {
-        return repo.findByUsernameAndProjectNameOrderByCreatedAtDesc(username, projectName);
+    /** All prompts for a project+version, newest first. */
+    public List<ScenarioPrompt> listPrompts(String username, String projectName, String versionLabel) {
+        if (!StringUtils.hasText(versionLabel)) {
+            throw new IllegalArgumentException("versionLabel is required - ScenarioService cannot list prompts");
+        }
+        return repo.findByUsernameAndProjectNameAndVersionLabelOrderByCreatedAtDesc(username, projectName, versionLabel);
     }
 
-    /** Recent N prompts for a project, newest first (best-effort cap). */
-    public List<ScenarioPrompt> listPrompts(String username, String projectName, int maxCount) {
-        List<ScenarioPrompt> all = listPrompts(username, projectName);
+    /** Recent N prompts for a project+version. */
+    public List<ScenarioPrompt> listPrompts(String username, String projectName, String versionLabel, int maxCount) {
+        List<ScenarioPrompt> all = listPrompts(username, projectName, versionLabel);
         if (maxCount <= 0 || all.size() <= maxCount) return all;
         return new ArrayList<>(all.subList(0, maxCount));
     }
 
-    /**
-     * Build a compact chat history string for an LLM.
-     * - Takes the most recent maxMessages prompts
-     * - Truncates overall length to maxChars
-     * - Formats each line as: "- [role] message (runId:NN, 2h ago)"
-     *
-     * Example:
-     * - [user] Please add more scenarios about international transactions. (runId:42, 2h ago)
-     *
-     * This keeps LLM context useful yet concise.
-     */
-    public String buildChatHistory(String username, String projectName, int maxMessages, int maxChars) {
-        List<ScenarioPrompt> recent = listPrompts(username, projectName, Math.max(1, maxMessages));
+    /** Clear prompts for a specific version */
+    public void clearPrompts(String username, String projectName, String versionLabel) {
+        if (!StringUtils.hasText(versionLabel)) {
+            throw new IllegalArgumentException("versionLabel is required - ScenarioService cannot clear prompts");
+        }
+        repo.deleteByUsernameAndProjectNameAndVersionLabel(username, projectName, versionLabel);
+    }
+
+    /** Build compact chat history for LLM. */
+    public String buildChatHistory(String username, String projectName, String versionLabel,
+                                   int maxMessages, int maxChars) {
+        List<ScenarioPrompt> recent = listPrompts(username, projectName, versionLabel, Math.max(1, maxMessages));
         StringBuilder sb = new StringBuilder();
-        // reverse to oldest→newest for better LLM context flow
         for (int i = recent.size() - 1; i >= 0; i--) {
             ScenarioPrompt p = recent.get(i);
             String raw = p.getMessage() == null ? "" : p.getMessage().replace("\n", " ").trim();
@@ -114,17 +105,8 @@ public class ScenarioService {
         return sb.toString();
     }
 
-    /** Delete ALL prompts for a project (admin/cleanup). */
-    public void clearPrompts(String username, String projectName) {
-        var all = listPrompts(username, projectName);
-        if (!all.isEmpty()) {
-            repo.deleteAllInBatch(all);
-        }
-    }
-
     // ---------------- helpers ----------------
 
-    /** Extract role if stored as [role] prefix; default "user". */
     private String extractRolePrefix(String message) {
         if (!StringUtils.hasText(message)) return "user";
         if (message.startsWith("[") && message.contains("]")) {
@@ -135,7 +117,6 @@ public class ScenarioService {
         return "user";
     }
 
-    /** Remove the role prefix for LLM content (keeps message body). */
     private String stripRolePrefix(String message) {
         if (!StringUtils.hasText(message)) return "";
         if (message.startsWith("[") && message.contains("]")) {
@@ -145,7 +126,6 @@ public class ScenarioService {
         return message;
     }
 
-    /** Human-friendly relative age (e.g., "2h ago", "5m ago", "just now"). */
     private String relativeAge(Timestamp ts) {
         if (ts == null) return "unknown";
         long secs = Duration.between(ts.toInstant(), Instant.now()).getSeconds();

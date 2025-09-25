@@ -1,3 +1,4 @@
+// src/main/java/com/mesh/behaviour/behaviour/model/UnitTestScenarioPrompt.java
 package com.mesh.behaviour.behaviour.model;
 
 import jakarta.persistence.*;
@@ -6,28 +7,20 @@ import lombok.*;
 import java.sql.Timestamp;
 
 @Entity
-@Table(name = "scenario_prompts")
+@Table(name = "unit_test_scenario_prompts")
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ScenarioPrompt {
-
+public class UnitTestScenarioPrompt {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     private String username;
-
     private String projectName;
-
-    // 🔹 NEW FIELD to scope prompts by version
     private String versionLabel;
-
-    @Column(length = 4000)
-    private String message;   // natural language feedback from user/system
-
-    private Long runId;       // optional: link to a run
-
+    private String message;
+    private Long runId;
     private Timestamp createdAt;
 }

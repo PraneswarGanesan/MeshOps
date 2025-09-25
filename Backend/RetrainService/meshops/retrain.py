@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-retrain.py
-Multi-modal retrain script (tabular / image / text / json)
-- Detects dataset modality from provided dataset paths (extension or S3 prefix)
-- Trains a small model:
-    - tabular: sklearn (LogisticRegression/LinearRegression/RandomForest)
-    - image: torchvision ResNet18 fine-tune for N classes (small epochs)
-    - text: transformers DistilBERT fine-tune (small epochs)
-    - json: attempts to flatten to tabular
-- Writes artifacts under artifacts/versions/vN/runs/run_<job_id>/
-- Writes canonical model/metrics/retrain_report at version root if promoted
-- Uploads artifacts to S3 (if boto3 available)
+retrain.py (AAAR+)
+
+Implements an AAAR+ loop (Acquire → Augment → Assess → Retrain [+ Promote])
+for tabular, image, and text datasets in a resource-constrained setting.
+
+Acquire: Pull dataset(s), merge recent failed scenarios from behaviour runs.
+Augment: Apply safe augmentations (class balancing, light transforms).
+Assess:  Compare metrics with previous version to set improvement targets.
+Retrain: Train a compact model; retry once with augmentation if below targets.
+Promote: Publish new model if it meets or improves previous metrics.
+
+Artifacts are written under artifacts/versions/vN/runs/run_<job_id>/ and canonical
+model/metrics are updated at version root when promoted. S3 writes occur if boto3 is
+available.
 """
 from __future__ import annotations
 import argparse
@@ -127,6 +130,20 @@ def safe_read_csv(p: str) -> pd.DataFrame:
         except Exception:
             return pd.DataFrame()
 
+def safe_json_normalize(path: str) -> pd.DataFrame:
+    try:
+        df = pd.read_json(path, lines=True)
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    except Exception:
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+            if isinstance(raw, list):
+                return pd.json_normalize(raw)
+            return pd.json_normalize([raw])
+        except Exception:
+            return pd.DataFrame()
+
 def flatten_json_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     out = {}
     def _flatten(obj, prefix=""):
@@ -154,6 +171,70 @@ def detect_modality_from_path(path: str) -> str:
     if lower.endswith("/") or lower.endswith("images") or "/images/" in lower:
         return "image_folder"
     return "tabular"
+
+# ---------------------------
+# AAAR+ helpers
+# ---------------------------
+
+def load_previous_version_metrics(bucket: str, project_prefix: str) -> Tuple[int, Dict[str, Any]]:
+    if not HAS_BOTO3:
+        return 0, {}
+    try:
+        keys = s3_list_keys(bucket, f"{project_prefix}artifacts/versions/")
+        latest_v = 0
+        for k in keys:
+            parts = k.split("/")
+            for p in parts:
+                if p.startswith("v") and p[1:].isdigit():
+                    latest_v = max(latest_v, int(p[1:]))
+        if latest_v <= 0:
+            return 0, {}
+        metrics_key = f"{project_prefix}artifacts/versions/v{latest_v}/metrics.json"
+        if s3_key_exists(bucket, metrics_key):
+            try:
+                return latest_v, s3_get_json(bucket, metrics_key)
+            except Exception:
+                return latest_v, {}
+        return latest_v, {}
+    except Exception:
+        return 0, {}
+
+def better_than_previous(new_metrics: Dict[str, Any], prev_metrics: Dict[str, Any]) -> bool:
+    if not prev_metrics:
+        return True
+    def f(m, k):
+        try:
+            return float(m.get(k, 0.0))
+        except Exception:
+            return 0.0
+    new_acc = max(f(new_metrics, "accuracy"), f(new_metrics, "val_accuracy"))
+    old_acc = max(f(prev_metrics, "accuracy"), f(prev_metrics, "val_accuracy"))
+    new_f1 = f(new_metrics, "f1")
+    old_f1 = f(prev_metrics, "f1")
+    return (new_acc >= old_acc + 0.005) or (new_f1 >= old_f1 + 0.005)
+
+def oversample_minority_classes(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+    try:
+        counts = y.value_counts()
+        if counts.empty:
+            return X, y
+        max_count = counts.max()
+        frames = []
+        for cls, cnt in counts.items():
+            idx = y[y == cls].index
+            need = max_count - cnt
+            if need <= 0:
+                frames.append(X.loc[idx])
+            else:
+                up_idx = np.random.choice(idx, size=need, replace=True)
+                frames.append(pd.concat([X.loc[idx], X.loc[up_idx]]))
+        X_new = pd.concat(frames)
+        y_new = pd.concat([pd.Series([c]*len(frames[i]), index=frames[i].index)
+                           for i, c in enumerate(counts.index)])
+        X_new = X_new.reindex(y_new.index)
+        return X_new, y_new
+    except Exception:
+        return X, y
 
 # ---------------------------
 # Image training (PyTorch)
@@ -364,6 +445,22 @@ def train_tabular_model(df: pd.DataFrame, work_dir: Path, logs_path: str, sample
     joblib.dump(model, str(work_dir/"model.pkl"))
     return model, metrics
 
+def aaar_plus_tabular(df: pd.DataFrame, bucket: str, project_prefix: str, latest_v: int,
+                      work_dir: Path, logs_local: Path) -> Tuple[Any, Dict[str, Any]]:
+    df = merge_failed_tests_into_df(df, bucket, project_prefix, latest_v, work_dir, logs_local)
+    model, metrics = train_tabular_model(df, work_dir, str(logs_local))
+    try:
+        acc = float(metrics.get("accuracy", 0.0))
+        if acc < 0.85 and "label" in df.columns:
+            y = df["label"]
+            X = df.drop(columns=["label"]).select_dtypes(include=[np.number]).fillna(0)
+            Xb, yb = oversample_minority_classes(X, y)
+            df_bal = pd.concat([Xb, yb.rename("label")], axis=1)
+            model, metrics = train_tabular_model(df_bal, work_dir, str(logs_local))
+    except Exception:
+        pass
+    return model, metrics
+
 # ---------------------------
 # Merge failed testcases
 # ---------------------------
@@ -423,16 +520,7 @@ def main():
     username, project = parts[0], parts[1]
     project_prefix = f"{username}/{project}/"
 
-    latest_v = 0
-    if HAS_BOTO3:
-        try:
-            keys = s3_list_keys(bucket, f"{project_prefix}artifacts/versions/")
-            for k in keys:
-                for p in k.split("/"):
-                    if p.startswith("v") and p[1:].isdigit():
-                        latest_v = max(latest_v, int(p[1:]))
-        except Exception:
-            latest_v = 0
+    latest_v, prev_metrics = load_previous_version_metrics(bucket, project_prefix)
     new_v = latest_v + 1
     new_v_name = f"v{new_v}"
     version_prefix = f"{project_prefix}artifacts/versions/{new_v_name}/"
@@ -469,25 +557,12 @@ def main():
     modality = detect_modality_from_path(primary)
     model = None
     metrics = {}
-    promoted = True
+    promoted = better_than_previous(metrics, prev_metrics)
 
     try:
         if modality in ("tabular","json"):
-            if modality == "json":
-                try:
-                    df = pd.read_json(primary, lines=True)
-                except Exception:
-                    with open(primary) as f:
-                        raw = json.load(f)
-                    if isinstance(raw, list):
-                        df = pd.json_normalize(raw)
-                    else:
-                        df = pd.json_normalize([raw])
-            else:
-                df = safe_read_csv(primary)
-
-            df = merge_failed_tests_into_df(df, bucket, project_prefix, latest_v, work_dir, logs_local)
-            model, metrics = train_tabular_model(df, work_dir, str(logs_local))
+            df = safe_json_normalize(primary) if modality == "json" else safe_read_csv(primary)
+            model, metrics = aaar_plus_tabular(df, bucket, project_prefix, latest_v, work_dir, logs_local)
 
         elif modality in ("image_folder","image_file"):
             if primary.startswith("s3://") and HAS_BOTO3:

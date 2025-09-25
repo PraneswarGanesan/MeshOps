@@ -19,13 +19,14 @@ public class ScenarioController {
 
     /**
      * Frontend expects:
-     * POST /api/scenarios/{username}/{projectName}/prompts
+     * POST /api/scenarios/{username}/{projectName}/{versionLabel}/prompts
      * Body: { "message": "...", "runId": 42 }
      */
-    @PostMapping("/{username}/{projectName}/prompts")
+    @PostMapping("/{username}/{projectName}/{versionLabel}/prompts")
     public ScenarioPrompt savePrompt(
             @PathVariable String username,
             @PathVariable String projectName,
+            @PathVariable String versionLabel,
             @RequestBody Map<String, Object> body
     ) {
         String message = body == null ? null : String.valueOf(body.getOrDefault("message", ""));
@@ -33,35 +34,37 @@ public class ScenarioController {
         if (body != null && body.get("runId") != null) {
             try { runId = Long.valueOf(String.valueOf(body.get("runId"))); } catch (Exception ignored) {}
         }
-        return scenarioService.savePrompt(username, projectName, message, runId);
+        return scenarioService.savePrompt(username, projectName, versionLabel, message, runId);
     }
 
     /**
      * Frontend expects:
-     * GET /api/scenarios/{username}/{projectName}/prompts?limit=N
+     * GET /api/scenarios/{username}/{projectName}/{versionLabel}/prompts?limit=N
      */
-    @GetMapping("/{username}/{projectName}/prompts")
+    @GetMapping("/{username}/{projectName}/{versionLabel}/prompts")
     public List<ScenarioPrompt> listPrompts(
             @PathVariable String username,
             @PathVariable String projectName,
+            @PathVariable String versionLabel,
             @RequestParam(name = "limit", required = false) Integer limit
     ) {
         if (limit != null && limit > 0) {
-            return scenarioService.listPrompts(username, projectName, limit);
+            return scenarioService.listPrompts(username, projectName, versionLabel, limit);
         }
-        return scenarioService.listPrompts(username, projectName);
+        return scenarioService.listPrompts(username, projectName, versionLabel);
     }
 
     /**
      * Optional cleanup:
-     * DELETE /api/scenarios/{username}/{projectName}/prompts
+     * DELETE /api/scenarios/{username}/{projectName}/{versionLabel}/prompts
      */
-    @DeleteMapping("/{username}/{projectName}/prompts")
+    @DeleteMapping("/{username}/{projectName}/{versionLabel}/prompts")
     public Map<String, Object> clearPrompts(
             @PathVariable String username,
-            @PathVariable String projectName
+            @PathVariable String projectName,
+            @PathVariable String versionLabel
     ) {
-        scenarioService.clearPrompts(username, projectName);
+        scenarioService.clearPrompts(username, projectName, versionLabel);
         return Map.of("cleared", true);
     }
 }
