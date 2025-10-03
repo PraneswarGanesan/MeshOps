@@ -223,125 +223,136 @@ USER BRIEF:
 
     private String buildDriverAndTestsPrompt(String ctx, String brief) {
         return String.format("""
-            You are generating a behaviour-testing kit for a user’s ML project.
-            Return exactly TWO fenced blocks:
-            1) ```python ...```    (driver.py)
-            2) ```yaml ...```      (tests.yaml)
+You are generating a behaviour-testing kit for a user’s ML project.
+Return **exactly TWO fenced blocks only**:
+1) ```python ...```    ← fully-runnable driver.py
+2) ```yaml ...```      ← fully-parsable tests.yaml
 
-            ========= BEGIN CONTEXT =========
-            %s
-            ========= END CONTEXT ===========
+========= BEGIN CONTEXT =========
+%s
+========= END CONTEXT ===========
 
-            RULES FOR driver.py:
-            - Output MUST be valid runnable Python 3 code, no TODO or pseudo-code.
-            - Must import: torch, torchvision, sklearn, yaml, pandas, matplotlib, PIL.Image,
-              csv, json, joblib, subprocess, argparse, sys, os,
-              and also explicitly:
-                  from torchvision import models, transforms
-            - Must accept --base_dir argument.
-            - Normalise dataset root:
-                • If "<base_dir>/pre-processed" exists → use it as data_root
-                • Else use <base_dir>.
-            - Model handling (NO reliance on predict.py for inference; do inference in driver):
-                • Set model_path_pt = os.path.join(data_root, "model.pt")    ← critical path
-                • If model.pt exists → load torchvision ResNet18 (fc=2 classes) and set transform + idx_to_class.
-                • If model.pkl exists → load with joblib (tabular/text fallback).
-                • Else AUTO-TRAIN by running:
-                      python3 <base_dir>/pre-processed/train.py --base_dir <base_dir>/pre-processed
-                  with cwd=data_root (so train.py writes model.pt to data_root).
-                  After it finishes, confirm model.pt or model.pkl exists; if missing, print an error and exit(1).
-                • Always define transform and idx_to_class for image models (even when loading existing model).
-                • Device handling: device = "cuda" if available else "cpu"; map loads to device.
-            - Logging:
-                • Create/overwrite logs.txt in base_dir. Mirror key events and subprocess stdout/stderr into it.
-            - Tests execution:
-                • Safely parse tests.yaml:
-                      with open(tests_yaml_path,"r") as f:
-                          try: tests_config = yaml.safe_load(f)
-                          except yaml.YAMLError as e: print(f"YAML parse error: {e}"); sys.exit(1)
-                • Extract scenarios:
-                      scenarios = tests_config.get("scenarios", tests_config.get("tests", {}).get("scenarios", []))
-                      If empty → print a message, still create empty metrics.json and a placeholder confusion_matrix.png, then exit(0).
-                • For each scenario:
-                      - Initialise predicted = None and result = "FAIL".
-                      - If "function" == "load_data":
-                          PASS if directory exists and has at least one file; else FAIL. Set predicted to "non_empty" or "empty_or_missing".
-                        If "function" == "train_model":
-                          Run train.py again with cwd=data_root, timeout=900s. PASS if model file exists afterwards (predicted="model_saved").
-                        Else (predict):
-                          Build full path as os.path.join(data_root, scenario["input"]) (never include "pre-processed" in YAML paths).
-                          Try to open image with PIL and run inference directly with the loaded model.
-                          On image open error, set predicted=f"image_open_failed:{...}".
-                          Compare predicted vs expected for PASS/FAIL.
-                      - Append every row to tests.csv with columns: name,category,severity,expected,predicted,result (result exactly "PASS" or "FAIL").
-                • DO NOT use list-comprehension tricks for multi-line work; only normal for-loops.
-            - Inference details:
-                • Transforms: Resize(224,224) → ToTensor → Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]).
-                • idx_to_class = {0:"cat", 1:"dog"}; class_to_idx inverse.
-                • Wrap inference with torch.no_grad(), model.eval().
-            - Metrics:
-                • Collect y_true,y_pred only from predict-type scenarios where expected/predicted are valid labels.
-                • Compute accuracy, precision(macro), recall(macro), f1(macro, zero_division=0).
-                • Always create metrics.json and confusion_matrix.png:
-                    - If no valid data, write an empty/placeholder metrics.json (e.g., {"message":"No valid predict scenarios"})
-                      and a simple placeholder image.
-                    - If there is data, compute confusion_matrix and annotate each cell using explicit nested for-loops (no list-comprehensions).
-            - Artifacts (must be created in base_dir):
-                tests.csv, metrics.json, confusion_matrix.png, logs.txt, manifest.json, refiner_hints.json
-                • manifest.json must contain:
-                      {
-                        "artifacts": [...filenames...],
-                        "model_path": "<resolved path to model>",
-                        "data_root": "<resolved data_root>"
-                      }
-                • refiner_hints.json can be an empty JSON object {}.
-            - Console output must include EXACT lines (spelling/case/colons):
-                  Model trained and saved to: <path>
-                  Predictions generated.
-                  Evaluation metrics:
-                  Accuracy: <float>
-                  Precision: <float>
-                  Recall: <float>
-                  F1-score: <float>
-                Print these when applicable (e.g., only print the metrics block when metrics are computed or with zeros if you choose to default them).
-            - Subprocess constraints:
-                • All training subprocess calls must use timeout=900 and cwd=data_root.
-                • If subprocess returncode != 0, log stdout/stderr and fail gracefully with a clear message, exiting(1) for initial training.
-            - Robustness requirements (avoid future failures):
-                • Never rely on files outside CONTEXT; never invent paths.
-                • Do not import seaborn; use matplotlib only.
-                • Handle unreadable/unsupported image formats by catching PIL errors and marking predicted as "image_open_failed:...".
-                • Do not crash if metrics arrays are empty; still generate artifacts.
-                • Do not assume CUDA; code must run on CPU-only boxes.
+RULES FOR driver.py
+----------------------------------------------------
+- Must be VALID Python 3 code — NO TODOs / pseudo-code / markdown / prose.
+- Imports REQUIRED (single top-block only):
+      torch, torchvision,
+      from torchvision import models, transforms,
+      sklearn (metrics),
+      yaml, pandas, matplotlib.pyplot as plt,
+      PIL.Image (and UnidentifiedImageError),
+      csv, json, joblib,
+      subprocess, argparse, sys, os, time
+- Must accept CLI arg:  --base_dir
+- Normalise dataset root:
+      if "<base_dir>/pre-processed" exists → data_root = that
+      else → data_root = <base_dir>
+- Model handling (NO external predict.py):
+      model_path_pt  = os.path.join(data_root, "model.pt")
+      model_path_pkl = os.path.join(data_root, "model.pkl")
+      • if model.pt exists → load torchvision ResNet18 (fc=2)
+      • else if model.pkl → load via joblib
+      • else → AUTO-TRAIN by:
+            python3 <base_dir>/pre-processed/train.py   (cwd = data_root, timeout=900)
+        after subprocess finishes → MUST check model.pt or model.pkl exists,
+        if missing → print clear error + sys.exit(1)
+      • ALWAYS define transform + idx_to_class = {0:"cat",1:"dog"}
+      • device = "cuda" if available else "cpu"
+- Logging:
+      create/overwrite  logs.txt  in base_dir
+      mirror all key events + subprocess stdout/stderr to file and console
+- Tests execution:
+      load tests.yaml safely:
+          with open(tests_yaml_path,"r") as f:
+              try: tests_config = yaml.safe_load(f)
+              except yaml.YAMLError as e: print(f"YAML parse error: {e}"); sys.exit(1)
+      scenarios = tests_config.get("scenarios", tests_config.get("tests",{}).get("scenarios",[]))
+      if scenarios empty → still create:
+           • empty tests.csv header
+           • metrics.json  = {"message":"No valid predict scenarios"}
+           • confusion_matrix.png  placeholder text-image
+           • manifest.json + empty refiner_hints.json
+           then sys.exit(0)
+- For each scenario:
+      init predicted="N/A", result="FAIL"
+      if function == "load_data":
+            PASS if directory exists & has ≥1 file
+            predicted → "non_empty" or "empty_or_missing"
+      elif function == "train_model":
+            run train.py again with cwd=data_root, timeout=900
+            PASS if model file exists afterwards → predicted="model_saved"
+      else (predict):
+            build full path   os.path.join(data_root, scenario["input"])
+            try open image with PIL  (catch FileNotFoundError / UnidentifiedImageError / OSError)
+            run inference directly with loaded model under torch.no_grad(), model.eval()
+            predicted = idx_to_class[pred_idx]  OR  "image_open_failed:<reason>"
+      compare predicted vs expected → result="PASS" or "FAIL"
+      append each row → tests.csv with columns:
+            name,category,severity,expected,predicted,result  (result ALWAYS literal PASS/FAIL)
+- Metrics:
+      collect y_true/y_pred ONLY from predict-type scenarios whose expected & predicted are valid labels
+      compute accuracy, precision(macro), recall(macro), f1(macro, zero_division=0)
+      always produce BOTH  metrics.json  and  confusion_matrix.png
+      if no valid predict rows → metrics.json placeholder + simple text-image
+      **Confusion-matrix cells MUST be annotated using explicit nested for-loops:**
+            for i in range(cm.shape[0]):
+                for j in range(cm.shape[1]):
+                    val = cm[i,j]
+                    ax.text(j, i, f"{val}", ha="center", va="center",
+                            color="white" if val>thresh else "black")
+      ❌ absolutely NO list-comprehension tricks for multi-line logic
+- Artifacts (all written into base_dir):
+      logs.txt, tests.csv, metrics.json, confusion_matrix.png,
+      manifest.json, refiner_hints.json  (+ model.pt if exists)
+      manifest.json  must include:
+      {
+        "artifacts":[...],
+        "model_path":"<resolved model path>",
+        "data_root":"<resolved data_root>"
+      }
+      refiner_hints.json = empty JSON {}
+- Console output MUST contain these exact headings when applicable:
+      Model trained and saved to: <path>
+      Predictions generated.
+      Evaluation metrics:
+      Accuracy: <float>
+      Precision: <float>
+      Recall: <float>
+      F1-score: <float>
+- Robustness hard-rules:
+      • Never assume CUDA available; must run on CPU-only boxes
+      • Never fabricate paths/files outside CONTEXT
+      • Catch unreadable / unsupported image formats → predicted="image_open_failed:<detail>"
+      • If metrics arrays empty → still generate artifacts without crashing
+      • Do NOT import seaborn
 
-            RULES FOR tests.yaml:
-            - Output ONLY raw YAML (no markdown fences).
-            - Must start exactly with:
-            tests:
-              scenarios:
-            - Use 2-space indentation everywhere.
-            - All string values (name, input, expected, category, severity, function) MUST be wrapped in double quotes.
-            - DO NOT include inline comments (#...).
-            - Each scenario must include:
-              • "name"
-              • "input"  – chosen ONLY from dataset paths in CONTEXT, written exactly the same but WITHOUT the leading "pre-processed/"
-              • "expected" – either "non_empty", "model_saved", or a valid class label ("cat" or "dog")
-              • "category" – e.g., "functional", "robustness", "data_integrity"
-              • "severity" – e.g., "low", "medium", "high", "critical"
-              • Optional "function" – only "load_data" or "train_model"
-            - Provide at least 3 scenarios:
-              • One function-based (load_data or train_model)
-              • One predict scenario with a correct expected label
-              • One negative/FAIL scenario for robustness (e.g., wrong expected label or a missing file path)
-            - If more scenarios are needed than available files in CONTEXT, you may reuse a file path.
-            - Never fabricate new files or directories not present in CONTEXT.
-            - The YAML MUST parse cleanly with yaml.safe_load() (no ScannerError).
+RULES FOR tests.yaml
+----------------------------------------------------
+- Output ONLY raw YAML — NO markdown fences, comments or prose.
+- Must begin EXACTLY:
 
-            USER BRIEF:
-            %s
+tests:
+  scenarios:
 
+- Use 2-space indentation everywhere.
+- Every string field ("name","input","expected","category","severity","function") MUST be in double quotes.
+- Each scenario MUST include:
+      "name", "input", "expected", "category", "severity"
+      and optional "function"  (only "load_data" or "train_model")
+- Provide ≥3 scenarios:
+      • ≥1 function-based (load_data or train_model)
+      • ≥1 predict scenario with a correct expected label
+      • ≥1 negative / FAIL case (wrong expected label OR missing file)
+- Input paths must be chosen ONLY from dataset paths in CONTEXT,
+  written exactly the same BUT WITHOUT the leading "pre-processed/"
+- Never invent paths or dirs not in CONTEXT.
+- YAML must load cleanly via yaml.safe_load() with NO ScannerError.
+
+USER BRIEF:
+%s
 """, ctx == null ? "" : ctx, brief == null ? "" : brief);
     }
+
 
 
 
