@@ -187,112 +187,162 @@ USER BRIEF:
         return String.format("""
 You are generating ONLY a tests.yaml file for behaviour testing of an ML project.
 
-CONTEXT:
+========= CONTEXT =========
 %s
+========= END CONTEXT =====
 
-RULES:
-- Output ONLY YAML (no markdown fences, no prose).
-- YAML must start with "tests:" and then "scenarios:".
-- Each scenario must include:
-    - name
-    - input (must be EXACTLY one of the dataset file paths listed in CONTEXT, 
-             but REMOVE the leading "pre-processed/". 
-             Example: if context shows "pre-processed/images/train/cats/cat-1.jpg", 
-             the input should be "images/train/cats/cat-1.jpg").
-    - expected (ground truth label).
-- You MUST use every distinct file path from CONTEXT at least once.
-- If more scenarios are required than the number of files available, REUSE existing files (e.g., the same file can appear in both a PASS and a FAIL case).
-- Do NOT fabricate new file names (e.g., "dog-4.jpg" or "cat-10.png").
-- Ensure YAML schema validity.
+RULES FOR OUTPUT:
+- Output ONLY raw YAML (no markdown fences, no prose, no code block markers).
+- YAML must begin exactly as:
+tests:
+  scenarios:
+- Use 2 spaces per indentation level throughout the YAML.
+- All string values (name, input, expected, category, severity) MUST be wrapped in double quotes.
+- DO NOT include any inline comments (# …) after any YAML value.
+- Do NOT add extra blank lines between YAML keys.
+- Each scenario must include these keys:
+    "name"
+    "input"     – must be chosen ONLY from the dataset paths listed in CONTEXT  
+                  and written exactly as shown there, but with the leading "pre-processed/" removed
+    "expected"  – must be one of: "non_empty", "model_saved", or a valid class label (e.g. "cat", "dog")
+    "category"  – e.g. "functional", "robustness", "data_integrity"
+    "severity"  – one of: "low", "medium", "high", "critical"
+    (optionally "function" for load_data or train_model scenarios)
+- Provide AT LEAST 3 scenarios:
+      • One function-based scenario (use "load_data" or "train_model")
+      • One predict scenario with a correct expected label
+      • One negative/FAIL scenario for robustness (for example: wrong expected label or non-existent path)
+- If more scenarios are needed than the number of files available, reuse existing file paths.
+- NEVER fabricate any new file names or directories not present in CONTEXT.
+- The final YAML MUST successfully parse using Python’s yaml.safe_load() with no errors.
 
 USER BRIEF:
 %s
 """, context == null ? "" : context, brief == null ? "" : brief);
     }
+
     private String buildDriverAndTestsPrompt(String ctx, String brief) {
         return String.format("""
-You are generating a behaviour-testing kit for a user's ML project.
-Return exactly TWO fenced blocks:
-1) ```python ...``` (driver.py)
-2) ```yaml ...```   (tests.yaml)
+            You are generating a behaviour-testing kit for a user’s ML project.
+            Return exactly TWO fenced blocks:
+            1) ```python ...```    (driver.py)
+            2) ```yaml ...```      (tests.yaml)
 
-========= BEGIN CONTEXT =========
-%s
-========= END CONTEXT ===========
+            ========= BEGIN CONTEXT =========
+            %s
+            ========= END CONTEXT ===========
 
-Rules for driver.py:
-- Output MUST be complete Python code (no stubs, no pseudocode).
-- Must import: torch, torchvision, sklearn, yaml, pandas, matplotlib, PIL.Image, csv, json, joblib, subprocess, argparse, sys, os.
-- Must accept a --base_dir argument via argparse.
-- Normalize dataset root:
-  * If "pre-processed/" exists under base_dir, use it.
-  * Else use base_dir directly.
-- Model handling:
-  * If model.pt exists: load torchvision ResNet18 (fc = 2 classes), define transform + idx_to_class.
-  * If model.pkl exists: load with joblib, define preprocessing steps (tabular or text).
-  * Else: AUTO-TRAIN by running `train.py` located inside the **pre-processed/** directory:
-      - Run as subprocess: `python3 <base_dir>/pre-processed/train.py --base_dir <base_dir>/pre-processed`.
-      - After it completes, ensure model.pt or model.pkl now exists.
-      - If still missing, exit with error.
-  * ALWAYS define transform and idx_to_class if image model is used, even when loading existing model.
-- Tests execution:
-  * Parse tests.yaml. Accept both styles safely:
-      scenarios = tests.get("scenarios", tests.get("tests", {}).get("scenarios", []))
-  * For each scenario:
-      - Initialize `prediction = None` at the start of the loop.
-      - If a "function" key exists:
-          - load_data → PASS if directory exists and is non-empty, else FAIL.
-          - train_model → trigger subprocess call to train.py again; PASS if model file created.
-          - predict → run inference, compare predicted vs expected, collect y_true and y_pred.
-      - Else (no "function" key, only input/expected):
-          - Treat as a predict test. Run inference and compare expected vs predicted.
-      - Append results to tests.csv with columns: name,category,severity,expected,predicted,result.
-      - `predicted` column must be the actual prediction (or null if not applicable).
-      - Result must be PASS or FAIL.
-- Metrics:
-  * Collect y_true and y_pred dynamically from predict-type scenarios.
-  * accuracy = accuracy_score(y_true, y_pred)
-  * precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
-  * recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
-  * f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
-  * Save confusion_matrix.png, metrics.json.
-- Artifacts to produce in base_dir:
-  * tests.csv
-  * metrics.json
-  * confusion_matrix.png
-  * logs.txt
-  * manifest.json (list all generated files + metadata)
-  * refiner_hints.json (suggest improvements if failures occur)
-- Print EXACT lines:
-    Model trained and saved to: <path>
-    Predictions generated.
-    Evaluation metrics:
-    Accuracy: <float>
-    Precision: <float>
-    Recall: <float>
-    F1-score: <float>
-- Code must never reference "pre-processed" explicitly in scenario paths.
-- Do NOT invent file paths. Use only those listed in CONTEXT.
+            RULES FOR driver.py:
+            - Output MUST be valid runnable Python 3 code, no TODO or pseudo-code.
+            - Must import: torch, torchvision, sklearn, yaml, pandas, matplotlib, PIL.Image,
+              csv, json, joblib, subprocess, argparse, sys, os,
+              and also explicitly:
+                  from torchvision import models, transforms
+            - Must accept --base_dir argument.
+            - Normalise dataset root:
+                • If "<base_dir>/pre-processed" exists → use it as data_root
+                • Else use <base_dir>.
+            - Model handling (NO reliance on predict.py for inference; do inference in driver):
+                • Set model_path_pt = os.path.join(data_root, "model.pt")    ← critical path
+                • If model.pt exists → load torchvision ResNet18 (fc=2 classes) and set transform + idx_to_class.
+                • If model.pkl exists → load with joblib (tabular/text fallback).
+                • Else AUTO-TRAIN by running:
+                      python3 <base_dir>/pre-processed/train.py --base_dir <base_dir>/pre-processed
+                  with cwd=data_root (so train.py writes model.pt to data_root).
+                  After it finishes, confirm model.pt or model.pkl exists; if missing, print an error and exit(1).
+                • Always define transform and idx_to_class for image models (even when loading existing model).
+                • Device handling: device = "cuda" if available else "cpu"; map loads to device.
+            - Logging:
+                • Create/overwrite logs.txt in base_dir. Mirror key events and subprocess stdout/stderr into it.
+            - Tests execution:
+                • Safely parse tests.yaml:
+                      with open(tests_yaml_path,"r") as f:
+                          try: tests_config = yaml.safe_load(f)
+                          except yaml.YAMLError as e: print(f"YAML parse error: {e}"); sys.exit(1)
+                • Extract scenarios:
+                      scenarios = tests_config.get("scenarios", tests_config.get("tests", {}).get("scenarios", []))
+                      If empty → print a message, still create empty metrics.json and a placeholder confusion_matrix.png, then exit(0).
+                • For each scenario:
+                      - Initialise predicted = None and result = "FAIL".
+                      - If "function" == "load_data":
+                          PASS if directory exists and has at least one file; else FAIL. Set predicted to "non_empty" or "empty_or_missing".
+                        If "function" == "train_model":
+                          Run train.py again with cwd=data_root, timeout=900s. PASS if model file exists afterwards (predicted="model_saved").
+                        Else (predict):
+                          Build full path as os.path.join(data_root, scenario["input"]) (never include "pre-processed" in YAML paths).
+                          Try to open image with PIL and run inference directly with the loaded model.
+                          On image open error, set predicted=f"image_open_failed:{...}".
+                          Compare predicted vs expected for PASS/FAIL.
+                      - Append every row to tests.csv with columns: name,category,severity,expected,predicted,result (result exactly "PASS" or "FAIL").
+                • DO NOT use list-comprehension tricks for multi-line work; only normal for-loops.
+            - Inference details:
+                • Transforms: Resize(224,224) → ToTensor → Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]).
+                • idx_to_class = {0:"cat", 1:"dog"}; class_to_idx inverse.
+                • Wrap inference with torch.no_grad(), model.eval().
+            - Metrics:
+                • Collect y_true,y_pred only from predict-type scenarios where expected/predicted are valid labels.
+                • Compute accuracy, precision(macro), recall(macro), f1(macro, zero_division=0).
+                • Always create metrics.json and confusion_matrix.png:
+                    - If no valid data, write an empty/placeholder metrics.json (e.g., {"message":"No valid predict scenarios"})
+                      and a simple placeholder image.
+                    - If there is data, compute confusion_matrix and annotate each cell using explicit nested for-loops (no list-comprehensions).
+            - Artifacts (must be created in base_dir):
+                tests.csv, metrics.json, confusion_matrix.png, logs.txt, manifest.json, refiner_hints.json
+                • manifest.json must contain:
+                      {
+                        "artifacts": [...filenames...],
+                        "model_path": "<resolved path to model>",
+                        "data_root": "<resolved data_root>"
+                      }
+                • refiner_hints.json can be an empty JSON object {}.
+            - Console output must include EXACT lines (spelling/case/colons):
+                  Model trained and saved to: <path>
+                  Predictions generated.
+                  Evaluation metrics:
+                  Accuracy: <float>
+                  Precision: <float>
+                  Recall: <float>
+                  F1-score: <float>
+                Print these when applicable (e.g., only print the metrics block when metrics are computed or with zeros if you choose to default them).
+            - Subprocess constraints:
+                • All training subprocess calls must use timeout=900 and cwd=data_root.
+                • If subprocess returncode != 0, log stdout/stderr and fail gracefully with a clear message, exiting(1) for initial training.
+            - Robustness requirements (avoid future failures):
+                • Never rely on files outside CONTEXT; never invent paths.
+                • Do not import seaborn; use matplotlib only.
+                • Handle unreadable/unsupported image formats by catching PIL errors and marking predicted as "image_open_failed:...".
+                • Do not crash if metrics arrays are empty; still generate artifacts.
+                • Do not assume CUDA; code must run on CPU-only boxes.
 
-Rules for tests.yaml:
-- Output ONLY YAML (no markdown fences).
-- Must start with "tests:" and then "scenarios:".
-- At least 3 scenarios:
-    * One function-based test (load_data or train_model).
-    * One predict test with correct expected label.
-    * One negative/FAIL case for robustness.
-- Each scenario includes:
-    - name
-    - function (optional: load_data, train_model, predict) OR input/expected directly.
-    - input (relative path; null allowed for train_model).
-    - expected (non_empty, model_saved, or class label).
-- Never fabricate non-existent files.
-- Schema must be valid YAML.
+            RULES FOR tests.yaml:
+            - Output ONLY raw YAML (no markdown fences).
+            - Must start exactly with:
+            tests:
+              scenarios:
+            - Use 2-space indentation everywhere.
+            - All string values (name, input, expected, category, severity, function) MUST be wrapped in double quotes.
+            - DO NOT include inline comments (#...).
+            - Each scenario must include:
+              • "name"
+              • "input"  – chosen ONLY from dataset paths in CONTEXT, written exactly the same but WITHOUT the leading "pre-processed/"
+              • "expected" – either "non_empty", "model_saved", or a valid class label ("cat" or "dog")
+              • "category" – e.g., "functional", "robustness", "data_integrity"
+              • "severity" – e.g., "low", "medium", "high", "critical"
+              • Optional "function" – only "load_data" or "train_model"
+            - Provide at least 3 scenarios:
+              • One function-based (load_data or train_model)
+              • One predict scenario with a correct expected label
+              • One negative/FAIL scenario for robustness (e.g., wrong expected label or a missing file path)
+            - If more scenarios are needed than available files in CONTEXT, you may reuse a file path.
+            - Never fabricate new files or directories not present in CONTEXT.
+            - The YAML MUST parse cleanly with yaml.safe_load() (no ScannerError).
 
-USER BRIEF:
-%s
+            USER BRIEF:
+            %s
+
 """, ctx == null ? "" : ctx, brief == null ? "" : brief);
     }
+
 
 
     /* ================= CONTEXT BUILDER ================= */
@@ -479,25 +529,40 @@ USER BRIEF:
 
 
     /* ================= GEMINI CALL ================= */
-
     private Mono<String> callGemini(String prompt) {
-        String finalUrl = url + apiKey;
-        Map<String, Object> body = Map.of("contents", List.of(Map.of("parts", List.of(Map.of("text", prompt)))));
-        try {
-            String bodyJson = mapper.writeValueAsString(body);
-            log.debug("[LLM] POST {} with body: {}", finalUrl, bodyJson);
-        } catch (Exception ignored) {}
+        // Create request body matching Gemini API format
+        Map<String, Object> body = Map.of(
+                "contents", new Object[]{
+                        Map.of("parts", new Object[]{
+                                Map.of("text", prompt)
+                        })
+                }
+        );
 
-        return webClient.post().uri(finalUrl)
-                .contentType(MediaType.APPLICATION_JSON)
+        // Concatenate URL and API key directly (matching your working old code pattern)
+        String fullUrl = url + apiKey;
+        log.info("This is the full api key we are calling"+fullUrl);
+        log.info("Calling Gemini API");
+
+        return webClient.post()
+                .uri(fullUrl)
+                .header("Content-Type", "application/json")
                 .bodyValue(body)
                 .retrieve()
+                .onStatus(
+                        status -> status.is4xxClientError() || status.is5xxServerError(),
+                        response -> response.bodyToMono(String.class)
+                                .defaultIfEmpty("<empty>")
+                                .map(errorBody -> {
+                                    log.error("Gemini API error: Status={}, Body={}", response.statusCode(), errorBody);
+                                    return new RuntimeException(
+                                            "Gemini API error [" + response.statusCode() + "]: " + errorBody
+                                    );
+                                })
+                )
                 .bodyToMono(String.class)
-                .doOnError(e -> log.warn("Gemini call failed: {}", e.getMessage()));
+                .doOnError(error -> log.error("Failed to call Gemini API", error));
     }
-
-
-    /* ================= PARSE & SAVE ================= */
 
     /* ================= PARSE & SAVE ================= */
     private Map<String, String> parseAndSave(String geminiJson, String baseKey) {

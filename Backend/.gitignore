@@ -1,0 +1,46 @@
+# Build / IDE
+target/
+build/
+dist/
+*.class
+*.log
+
+# Maven / Gradle
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# IntelliJ / VS Code / Eclipse
+.idea/
+*.iws
+*.iml
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+.springBeans
+.sts4-cache
+.apt_generated
+.factorypath
+
+# NetBeans
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# Spring Boot properties
+src/main/resources/application.properties
+src/main/resources/application-*.properties
+
+# Env files (sensitive)
+.env
+*.env
+**/.env
+**/*.env
+
+# OS files
+.DS_Store
+Thumbs.db
