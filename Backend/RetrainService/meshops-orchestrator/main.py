@@ -6,29 +6,26 @@ from typing import Dict, Any, List
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
-
 from dotenv import load_dotenv
 
-# Re-use your aws_utils/ec2_utils helpers (these must exist in your repo)
 from aws_utils import (
     parse_s3_path,
     s3_key_exists,
     s3_get_json,
     run_command_via_ssm,
     get_ssm_command_output,
-    s3_list_prefix,
 )
-from ec2_utils import create_instance, describe_instance
+from ec2_utils import create_instance
 
 import boto3
 
 load_dotenv()
 
-app = FastAPI(title="meshops-orchestrator", version="2.2")
+app = FastAPI(title="meshops-retrain-service", version="3.0")
 
 # --- Config from env ---
 EC2_AMI = os.getenv("AWS_EC2_AMI")
-EC2_INSTANCE_TYPE = os.getenv("AWS_EC2_INSTANCE_TYPE", "t3.small")
+EC2_INSTANCE_TYPE = os.getenv("AWS_EC2_INSTANCE_TYPE", "c5.large")
 EC2_IAM_ROLE = os.getenv("AWS_EC2_IAM_PROFILE")
 EC2_SECURITY_GROUPS = (
     os.getenv("AWS_EC2_SECURITY_GROUPS", "").split(",")
@@ -39,15 +36,19 @@ EC2_SUBNET = os.getenv("AWS_EC2_SUBNET")
 S3_BUCKET = os.getenv("AWS_S3_BUCKET")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# In-memory job store (replace with DynamoDB/RDS in prod)
+# In-memory job store
 jobs_store: Dict[str, Dict[str, Any]] = {}
 
-# Models for API
+# ---------- API MODELS ----------
 class RetrainRequest(BaseModel):
     username: str
     projectName: str
-    datasetPaths: List[str] = []
-    s3_base_path: str = None
+    files: List[str]                     # all user file paths from S3
+    saveBase: str                         # base S3 prefix to save outputs
+    version: str = None                   # optional, caller-managed
+    requirementsPath: str = None
+    extraArgs: List[str] = []              # reserved for future
+
 
 class StatusView(BaseModel):
     jobId: str
@@ -58,41 +59,22 @@ class StatusView(BaseModel):
     instance_id: str = None
     command_id: str = None
 
-# Helpers
+
+# ---------- HELPERS ----------
 def _generate_job_id(username: str, project: str) -> str:
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     uid = uuid.uuid4().hex[:6]
     return f"{username}_{project}_{ts}_{uid}"
 
-def _allocate_new_version(base_uri: str) -> int:
-    """Scan S3 for existing versions and allocate the next vN."""
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    bucket, prefix = parse_s3_path(base_uri + "versions/")
-    resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, Delimiter="/")
-    existing = []
-    for cp in resp.get("CommonPrefixes", []):
-        name = cp["Prefix"].rstrip("/").split("/")[-1]
-        if name.startswith("v"):
-            try:
-                existing.append(int(name[1:]))
-            except:
-                pass
-    return max(existing) + 1 if existing else 1
-
-def _build_s3_report_path(s3_base: str, username: str, project: str, job_id: str) -> str:
-    base = s3_base or f"s3://{S3_BUCKET}/{username}/{project}/artifacts/"
-    if not base.endswith("/"):
-        base += "/"
-    vnum = _allocate_new_version(base)
-    return f"{base}versions/v{vnum}/retrain_report.json"
 
 def _ensure_sandbox() -> str:
-    """Ensure single shared EC2 instance tagged meshops-shared-sandbox (create/start)."""
+    """
+    Ensure a single EC2 instance tagged 'meshops-retrain-service' exists and running.
+    """
     ec2 = boto3.client("ec2", region_name=AWS_REGION)
-
     resp = ec2.describe_instances(
         Filters=[
-            {"Name": "tag:Name", "Values": ["meshops-shared-sandbox"]},
+            {"Name": "tag:Name", "Values": ["meshops-retrain-service"]},
             {"Name": "instance-state-name", "Values": ["pending", "running", "stopped"]},
         ]
     )
@@ -106,26 +88,31 @@ def _ensure_sandbox() -> str:
             ec2.get_waiter("instance_running").wait(InstanceIds=[inst_id])
         return inst_id
 
-    # create new
+    # create new if none
     res = create_instance(
         ami_id=EC2_AMI,
         instance_type=EC2_INSTANCE_TYPE,
         sg_ids=EC2_SECURITY_GROUPS,
         subnet_id=EC2_SUBNET,
         iam_profile=EC2_IAM_ROLE,
-        tag_name="meshops-shared-sandbox",
+        tag_name="meshops-retrain-service",
     )
     return res["instance_id"]
 
-def _sync_and_run_job(job_id: str, s3_report_path: str, dataset_paths: list, instance_id: str):
-    datasets_args = " ".join([f"'{p}'" for p in dataset_paths]) if dataset_paths else ""
+
+def _sync_and_run_job(job_id: str, save_base: str, files: list, instance_id: str):
+    """
+    Sync retrain scripts to /opt/meshops and run retrain.sh
+    """
+    files_arg = " ".join([f"'{f}'" for f in files]) if files else ""
     cmd = f"""
 set -eux
 mkdir -p /opt/meshops
-aws s3 sync s3://{S3_BUCKET}/code/meshops /opt/meshops --quiet || true
+aws s3 sync s3://{S3_BUCKET}/code/meshops /opt/meshops --exact-timestamps --quiet
 cd /opt/meshops
-chmod +x run_retrain.sh || true
-./run_retrain.sh {job_id} {s3_report_path} {datasets_args}
+if [ -f requirements.txt ]; then pip3 install -r requirements.txt; fi
+chmod +x run_retrain.sh
+./run_retrain.sh "{job_id}" "{save_base}" {files_arg}
 """
     try:
         cmd_id = run_command_via_ssm(instance_id, cmd)
@@ -136,11 +123,14 @@ chmod +x run_retrain.sh || true
         jobs_store[job_id]["status"] = "FAILED"
         jobs_store[job_id]["error"] = str(e)
 
-# API endpoints
+
+# ---------- API ENDPOINTS ----------
 @app.post("/retrain", response_model=StatusView)
 def retrain(req: RetrainRequest, background_tasks: BackgroundTasks):
     job_id = _generate_job_id(req.username, req.projectName)
-    s3_report = _build_s3_report_path(req.s3_base_path, req.username, req.projectName, job_id)
+
+    # This will be where retrain.py uploads its final report
+    s3_report = f"s3://{S3_BUCKET}/{req.saveBase}/retrained/final_retrain_report.json"
 
     jobs_store[job_id] = {
         "username": req.username,
@@ -153,9 +143,12 @@ def retrain(req: RetrainRequest, background_tasks: BackgroundTasks):
     inst_id = _ensure_sandbox()
     jobs_store[job_id]["instance_id"] = inst_id
 
-    background_tasks.add_task(_sync_and_run_job, job_id, s3_report, req.datasetPaths or [], inst_id)
+    background_tasks.add_task(
+        _sync_and_run_job, job_id, req.saveBase, req.files or [], inst_id
+    )
 
     return StatusView(jobId=job_id, status="RUNNING", s3_report=s3_report, instance_id=inst_id)
+
 
 @app.get("/status/{job_id}", response_model=StatusView)
 def get_status(job_id: str):
@@ -206,6 +199,7 @@ def get_status(job_id: str):
         instance_id=job.get("instance_id"),
         command_id=job.get("command_id"),
     )
+
 
 @app.get("/console/{job_id}")
 def get_console(job_id: str):
