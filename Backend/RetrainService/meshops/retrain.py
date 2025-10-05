@@ -1,728 +1,492 @@
 #!/usr/bin/env python3
 """
-retrain.py (AAAR+)
+retrain.py — retraining orchestrator with live logs
 
-Implements an AAAR+ loop (Acquire → Augment → Assess → Retrain [+ Promote])
-for tabular, image, and text datasets in a resource-constrained setting.
-
-Acquire: Pull dataset(s), merge recent failed scenarios from behaviour runs.
-Augment: Apply safe augmentations (class balancing, light transforms).
-Assess:  Compare metrics with previous version to set improvement targets.
-Retrain: Train a compact model; retry once with augmentation if below targets.
-Promote: Publish new model if it meets or improves previous metrics.
-
-Artifacts are written under artifacts/versions/vN/runs/run_<job_id>/ and canonical
-model/metrics are updated at version root when promoted. S3 writes occur if boto3 is
-available.
+Target on-disk layout (always):
+/jobs/job_<id>/
+├── train.py
+├── predict.py
+├── driver.py              (if provided)
+├── images/
+│   ├── train/
+│   └── val/
+├── tests.yaml
+├── tests_merged.csv
+├── logs.txt
+└── model.pt               (written by train.py)
 """
-from __future__ import annotations
-import argparse
-import json
+
 import os
 import sys
+import json
+import time
 import shutil
-import tempfile
-from datetime import datetime
+import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List
 
-import numpy as np
-import pandas as pd
-import joblib
-import matplotlib.pyplot as plt
-
-# sklearn
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
-                             mean_absolute_error, mean_squared_error, confusion_matrix)
-
-# Optional heavy libs
-HAS_TORCH = False
-HAS_TRANSFORMERS = False
+# ─────────────────── Optional heavy deps ───────────────────
 try:
-    import torch
-    import torchvision
-    from torch.utils.data import Dataset, DataLoader
-    from torchvision import transforms, models
-    from PIL import Image
-    HAS_TORCH = True
+    import pandas as pd
 except Exception:
-    HAS_TORCH = False
-
+    pd = None
 try:
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
-    HAS_TRANSFORMERS = True
+    import yaml
 except Exception:
-    HAS_TRANSFORMERS = False
+    yaml = None
 
-# boto3 optional
-try:
-    import boto3
-    HAS_BOTO3 = True
-except Exception:
-    HAS_BOTO3 = False
+import boto3
 
-# ---------------------------
-# Helpers: S3 utilities
-# ---------------------------
-def parse_s3(s3_path: str) -> Tuple[str, str]:
-    assert s3_path.startswith("s3://"), "s3 path must start with s3://"
-    no_proto = s3_path[len("s3://"):]
-    bucket, key = no_proto.split("/", 1)
-    return bucket, key
+# ─────────────────── ENV ───────────────────
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+AUG_FAIL_DUP_K = int(os.getenv("AUG_FAIL_DUP_K", "3"))
+TRAIN_TIMEOUT_SEC = int(os.getenv("TRAIN_TIMEOUT_SEC", "1800"))
+DRIVER_TIMEOUT_SEC = int(os.getenv("DRIVER_TIMEOUT_SEC", "900"))
 
-def s3_client():
-    if not HAS_BOTO3:
-        raise RuntimeError("boto3 not available")
-    return boto3.client("s3")
+# ─────────────────── FS ───────────────────
+JOBS_ROOT = Path("/jobs")
 
-def s3_download(bucket: str, key: str, local_path: str):
-    s3 = s3_client()
-    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-    s3.download_file(bucket, key, local_path)
+# ─────────────────── Utilities ───────────────────
+def now_ts():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-def s3_upload(local_path: str, s3_path: str):
-    bucket, key = parse_s3(s3_path)
-    s3 = s3_client()
-    s3.upload_file(local_path, bucket, key)
-
-def s3_list_keys(bucket: str, prefix: str) -> List[str]:
-    s3 = s3_client()
-    paginator = s3.get_paginator("list_objects_v2")
-    keys = []
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            keys.append(obj["Key"])
-    return keys
-
-def s3_key_exists(bucket: str, key: str) -> bool:
-    try:
-        s3 = s3_client()
-        s3.head_object(Bucket=bucket, Key=key)
-        return True
-    except Exception:
-        return False
-
-def s3_get_json(bucket: str, key: str) -> Dict[str, Any]:
-    s3 = s3_client()
-    import io
-    resp = s3.get_object(Bucket=bucket, Key=key)
-    return json.load(io.BytesIO(resp["Body"].read()))
-
-# ---------------------------
-# Utilities
-# ---------------------------
-def now_ts() -> str:
-    return datetime.utcnow().isoformat() + "Z"
-
-def ensure_dir(p: str):
-    os.makedirs(p, exist_ok=True)
+def ensure_dir(p: Path) -> Path:
+    p.mkdir(parents=True, exist_ok=True)
     return p
 
-def safe_read_csv(p: str) -> pd.DataFrame:
-    try:
-        return pd.read_csv(p)
-    except Exception:
-        try:
-            return pd.read_csv(p, engine="python", error_bad_lines=False)
-        except Exception:
-            return pd.DataFrame()
+def sha256_file(p: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-def safe_json_normalize(path: str) -> pd.DataFrame:
-    try:
-        df = pd.read_json(path, lines=True)
-        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
-    except Exception:
-        try:
-            with open(path) as f:
-                raw = json.load(f)
-            if isinstance(raw, list):
-                return pd.json_normalize(raw)
-            return pd.json_normalize([raw])
-        except Exception:
-            return pd.DataFrame()
+def boto_client(service: str):
+    return boto3.client(
+        service,
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region_name=AWS_REGION,
+    )
 
-def flatten_json_record(rec: Dict[str, Any]) -> Dict[str, Any]:
-    out = {}
-    def _flatten(obj, prefix=""):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                _flatten(v, f"{prefix}{k}__")
+def log_append(logf: Path, msg: str, also_print=True):
+    line = f"[{now_ts()}] {msg}"
+    with open(logf, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    if also_print:
+        print(line, flush=True)
+
+# ─────────────────── Live runner ───────────────────
+def run_live(cmd, cwd, log_file, timeout):
+    log_append(log_file, f"[RUN] {' '.join(cmd)} (cwd={cwd})")
+    p = subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1
+    )
+    start = time.time()
+    assert p.stdout
+    for line in p.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        log_append(log_file, line.rstrip(), also_print=False)
+        if time.time() - start > timeout:
+            p.kill()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+    rc = p.wait()
+    if rc != 0:
+        raise RuntimeError(f"{cmd[0]} failed with exit code {rc}")
+    return rc
+
+# ─────────────────── S3 helpers ───────────────────
+def s3_is_prefix(bucket, key):
+    if not key or key.endswith("/"):
+        return True
+    s3 = boto_client("s3")
+    pfx = key if key.endswith("/") else key + "/"
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=pfx, MaxKeys=1)
+    return "Contents" in resp
+
+def s3_list_keys(bucket, prefix):
+    s3 = boto_client("s3")
+    keys = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            k = obj.get("Key")
+            if k and not k.endswith("/"):
+                keys.append(k)
+    return keys
+
+def s3_download_file(bucket, key, dest: Path):
+    ensure_dir(dest.parent)
+    boto_client("s3").download_file(bucket, key, str(dest))
+
+def s3_upload_file(local: Path, bucket, key):
+    boto_client("s3").upload_file(str(local), bucket, key)
+
+# ─────────────────── Argument parse ───────────────────
+def parse_args():
+    if len(sys.argv) < 3:
+        print("Usage: retrain.py <job_id> <save_base> <s3_key_1> ...", file=sys.stderr)
+        sys.exit(1)
+    if not S3_BUCKET:
+        print("AWS_S3_BUCKET not set", file=sys.stderr)
+        sys.exit(1)
+    job_id = sys.argv[1]
+    save_base = sys.argv[2].strip().strip("/")
+    s3_keys = [k.strip().strip("/") for k in sys.argv[3:]]
+    return job_id, save_base, s3_keys
+
+# ─────────────────── Download Inputs ───────────────────
+def classify_key(key):
+    kl = key.lower()
+    if kl.endswith("/"): return "prefix"
+    if kl.endswith("train.py"): return "train_py"
+    if kl.endswith("predict.py"): return "predict_py"
+    if kl.endswith("driver.py"): return "driver_py"
+    if kl.endswith(".csv") and "tests" in kl: return "tests_csv"
+    if kl.endswith((".csv",".json",".txt")): return "data_file"
+    return "other"
+
+def _flatten_to_images_root(full_key: str) -> str:
+    # keep subpath after ".../images/"
+    sub = full_key.split("images/", 1)[-1]
+    return sub
+
+def download_inputs(job_dir: Path, keys: List[str], logs: Path):
+    """
+    Rules:
+      1) Any S3 key that is a *prefix* mirrors its internal tree.
+      2) If the key path contains '/images/' (or basename == 'images'), map to job_dir/images/<subpath-after-images/>.
+      3) train.py / predict.py / driver.py are also copied to job root.
+      4) tests*.csv are preserved in-place AND added to tests list for merge.
+    """
+    s3 = boto_client("s3")
+    out = {"train_py": None, "predict_py": None, "driver_py": None, "tests_csv_paths": []}
+    imgs_root = ensure_dir(job_dir / "images")
+
+    def is_prefix(k: str) -> bool:
+        try:
+            s3.head_object(Bucket=S3_BUCKET, Key=k)
+            return False
+        except Exception:
+            pfx = k if k.endswith("/") else k + "/"
+            resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=pfx, MaxKeys=1)
+            return resp.get("KeyCount", 0) > 0
+
+    def list_all(prefix: str) -> List[str]:
+        pfx = prefix if prefix.endswith("/") else prefix + "/"
+        keys_acc = []
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=pfx):
+            for obj in page.get("Contents", []):
+                k = obj.get("Key")
+                if k and not k.endswith("/"):
+                    keys_acc.append(k)
+        return keys_acc
+
+    def after_images_path(u: str) -> Optional[str]:
+        lo = u.lower()
+        idx = lo.rfind("/images/")
+        if idx == -1:
+            return None
+        return u[idx + len("/images/"):]
+
+    def fetch_object(obj_key: str, base_dst: Path, anchor_images: bool):
+        unixk = obj_key.replace("\\", "/")
+        # If this object itself has /images/, anchor to job_dir/images/<after-images>
+        sub_after = after_images_path(unixk)
+        if sub_after is not None:
+            dest = imgs_root / sub_after
         else:
-            out[prefix[:-2]] = obj
-    _flatten(rec, "")
+            if anchor_images:
+                # prefix is images/, keep relative path under job_dir/images/
+                rel = unixk[len(base_src_prefix):]
+                dest = imgs_root / rel
+            else:
+                rel = unixk[len(base_src_prefix):]
+                dest = base_dst / rel
+
+        ensure_dir(dest.parent)
+        s3_download_file(S3_BUCKET, unixk, dest)
+
+        name = Path(unixk).name.lower()
+        if name == "train.py":
+            shutil.copyfile(dest, job_dir / "train.py")
+            out["train_py"] = job_dir / "train.py"
+        elif name == "predict.py":
+            shutil.copyfile(dest, job_dir / "predict.py")
+            out["predict_py"] = job_dir / "predict.py"
+        elif name == "driver.py":
+            shutil.copyfile(dest, job_dir / "driver.py")
+            out["driver_py"] = job_dir / "driver.py"
+        elif name.endswith(".csv") and "tests" in name:
+            out["tests_csv_paths"].append(dest)
+
+    for key in keys:
+        try:
+            # OBJECT
+            if not is_prefix(key):
+                unixk = key.replace("\\", "/")
+                # If single file under images path → place under job_dir/images/<after-images>
+                sub_after = after_images_path(unixk)
+                if sub_after is not None:
+                    dest = imgs_root / sub_after
+                else:
+                    # put single file at job root by filename
+                    dest = job_dir / Path(unixk).name
+                ensure_dir(dest.parent)
+                s3_download_file(S3_BUCKET, unixk, dest)
+
+                nm = Path(unixk).name.lower()
+                if nm == "train.py":
+                    shutil.copyfile(dest, job_dir / "train.py")
+                    out["train_py"] = job_dir / "train.py"
+                elif nm == "predict.py":
+                    shutil.copyfile(dest, job_dir / "predict.py")
+                    out["predict_py"] = job_dir / "predict.py"
+                elif nm == "driver.py":
+                    shutil.copyfile(dest, job_dir / "driver.py")
+                    out["driver_py"] = job_dir / "driver.py"
+                elif nm.endswith(".csv") and "tests" in nm:
+                    out["tests_csv_paths"].append(dest)
+
+                log_append(logs, f"Fetched file {unixk}")
+                continue
+
+            # PREFIX: mirror internal tree
+            base_src_prefix = key if key.endswith("/") else key + "/"
+            base_name = Path(base_src_prefix.rstrip("/")).name
+            # If prefix itself is images/, anchor to job_dir/images
+            if base_name.lower() == "images":
+                base_dst = imgs_root
+                anchor_images = True
+            else:
+                base_dst = job_dir / base_name
+                anchor_images = False
+
+            keys_under = list_all(base_src_prefix)
+            if not keys_under:
+                log_append(logs, f"[WARN] empty prefix: {key}")
+                continue
+
+            for k in keys_under:
+                fetch_object(k, base_dst, anchor_images)
+
+            if anchor_images:
+                log_append(logs, f"Mirrored {key} → {imgs_root}")
+            else:
+                log_append(logs, f"Mirrored {key} → {base_dst}")
+
+        except Exception as e:
+            log_append(logs, f"[ERROR] Download failed {key}: {e}")
+
+    # Ensure train/val dirs exist
+    ensure_dir(imgs_root / "train")
+    ensure_dir(imgs_root / "val")
+
+    # Log images tree
+    for root, _, files in os.walk(imgs_root):
+        rel = Path(root).relative_to(job_dir)
+        log_append(logs, f"{rel}/ -> {files}")
+
     return out
 
-# ---------------------------
-# Modality detection
-# ---------------------------
-def detect_modality_from_path(path: str) -> str:
-    lower = path.lower()
-    if lower.endswith(".csv") or lower.endswith(".tsv"):
-        return "tabular"
-    if lower.endswith(".json"):
-        return "json"
-    if lower.endswith(".txt"):
-        return "text"
-    if any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]):
-        return "image_file"
-    if lower.endswith("/") or lower.endswith("images") or "/images/" in lower:
-        return "image_folder"
-    return "tabular"
 
-# ---------------------------
-# AAAR+ helpers
-# ---------------------------
-
-def load_previous_version_metrics(bucket: str, project_prefix: str) -> Tuple[int, Dict[str, Any]]:
-    if not HAS_BOTO3:
-        return 0, {}
+# ─────────────────── Merge tests ───────────────────
+def merge_tests_and_build_yaml(job_dir, tests_paths, logs):
+    merged_csv = job_dir / "tests_merged.csv"
+    tests_yaml = job_dir / "tests.yaml"
+    if not tests_paths or pd is None or yaml is None:
+        merged_csv.write_text("name,input,category,severity,expected,predicted,result\n")
+        tests_yaml.write_text("scenarios: []\n")
+        log_append(logs, "No tests to merge.")
+        return merged_csv, tests_yaml
     try:
-        keys = s3_list_keys(bucket, f"{project_prefix}artifacts/versions/")
-        latest_v = 0
-        for k in keys:
-            parts = k.split("/")
-            for p in parts:
-                if p.startswith("v") and p[1:].isdigit():
-                    latest_v = max(latest_v, int(p[1:]))
-        if latest_v <= 0:
-            return 0, {}
-        metrics_key = f"{project_prefix}artifacts/versions/v{latest_v}/metrics.json"
-        if s3_key_exists(bucket, metrics_key):
-            try:
-                return latest_v, s3_get_json(bucket, metrics_key)
-            except Exception:
-                return latest_v, {}
-        return latest_v, {}
-    except Exception:
-        return 0, {}
+        frames = [pd.read_csv(p) for p in tests_paths]
+        if not frames:
+            raise ValueError("no frames")
+        dfm = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+        dfm.to_csv(merged_csv, index=False)
 
-def better_than_previous(new_metrics: Dict[str, Any], prev_metrics: Dict[str, Any]) -> bool:
-    if not prev_metrics:
-        return True
-    def f(m, k):
-        try:
-            return float(m.get(k, 0.0))
-        except Exception:
-            return 0.0
-    new_acc = max(f(new_metrics, "accuracy"), f(new_metrics, "val_accuracy"))
-    old_acc = max(f(prev_metrics, "accuracy"), f(prev_metrics, "val_accuracy"))
-    new_f1 = f(new_metrics, "f1")
-    old_f1 = f(prev_metrics, "f1")
-    return (new_acc >= old_acc + 0.005) or (new_f1 >= old_f1 + 0.005)
+        # Build minimal predict scenarios from FAIL rows; tolerate missing cols
+        def col(c): return c if c in dfm.columns else None
+        cat = col("category"); res = col("result")
 
-def oversample_minority_classes(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    try:
-        counts = y.value_counts()
-        if counts.empty:
-            return X, y
-        max_count = counts.max()
-        frames = []
-        for cls, cnt in counts.items():
-            idx = y[y == cls].index
-            need = max_count - cnt
-            if need <= 0:
-                frames.append(X.loc[idx])
-            else:
-                up_idx = np.random.choice(idx, size=need, replace=True)
-                frames.append(pd.concat([X.loc[idx], X.loc[up_idx]]))
-        X_new = pd.concat(frames)
-        y_new = pd.concat([pd.Series([c]*len(frames[i]), index=frames[i].index)
-                           for i, c in enumerate(counts.index)])
-        X_new = X_new.reindex(y_new.index)
-        return X_new, y_new
-    except Exception:
-        return X, y
-
-# ---------------------------
-# Image training (PyTorch)
-# ---------------------------
-if HAS_TORCH:
-    class SimpleImageDataset(Dataset):
-        def __init__(self, files: List[Tuple[str,int]], transforms=None):
-            self.files = files
-            self.transforms = transforms
-        def __len__(self):
-            return len(self.files)
-        def __getitem__(self, idx):
-            path, label = self.files[idx]
-            img = Image.open(path).convert("RGB")
-            if self.transforms:
-                img = self.transforms(img)
-            return img, label
-
-    def train_image_model(local_image_dir: str, work_dir: Path, logs_path: str, epochs=3, batch_size=16):
-        classes = sorted([d.name for d in Path(local_image_dir).iterdir() if d.is_dir()])
-        if not classes:
-            raise RuntimeError("No class subfolders found under image dir")
-        class_to_idx = {c:i for i,c in enumerate(classes)}
-        files = []
-        for c in classes:
-            for f in (Path(local_image_dir)/c).glob("*"):
-                if f.is_file():
-                    files.append((str(f), class_to_idx[c]))
-        np.random.shuffle(files)
-        split = int(0.8 * len(files))
-        train_files = files[:split]
-        val_files = files[split:]
-        ts = transforms.Compose([
-            transforms.Resize((224,224)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
-        ])
-        train_ds = SimpleImageDataset(train_files, transforms=ts)
-        val_ds = SimpleImageDataset(val_files, transforms=ts)
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_ds, batch_size=batch_size)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = models.resnet18(pretrained=True)
-        num_ftrs = model.fc.in_features
-        model.fc = torch.nn.Linear(num_ftrs, len(classes))
-        model = model.to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-        criterion = torch.nn.CrossEntropyLoss()
-        best_acc = 0.0
-        for epoch in range(epochs):
-            model.train()
-            total = 0; correct = 0
-            for xb, yb in train_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                optimizer.zero_grad()
-                out = model(xb)
-                loss = criterion(out, yb)
-                loss.backward(); optimizer.step()
-                pred = out.argmax(dim=1)
-                total += yb.size(0); correct += (pred==yb).sum().item()
-            train_acc = correct/total if total else 0.0
-            model.eval()
-            total=0; correct=0
-            y_true=[]; y_pred=[]
-            with torch.no_grad():
-                for xb,yb in val_loader:
-                    xb,yb = xb.to(device), yb.to(device)
-                    out = model(xb)
-                    pred = out.argmax(dim=1)
-                    total += yb.size(0); correct += (pred==yb).sum().item()
-                    y_true += yb.cpu().tolist(); y_pred += pred.cpu().tolist()
-            val_acc = correct/total if total else 0.0
-            with open(logs_path,"a") as lf:
-                lf.write(f"[{now_ts()}] Epoch {epoch+1}/{epochs}: train_acc={train_acc:.4f} val_acc={val_acc:.4f}\n")
-            if val_acc > best_acc:
-                best_acc = val_acc
-                torch.save(model.state_dict(), str(work_dir/"model.pt"))
-        metrics = {"val_accuracy": best_acc}
-        try:
-            cm = confusion_matrix(y_true, y_pred)
-            plt.imshow(cm); plt.title("Confusion Matrix"); plt.colorbar()
-            plt.savefig(work_dir/"confusion_matrix.png"); plt.close()
-        except Exception:
-            pass
-        return model, metrics, classes
-
-# ---------------------------
-# Text training
-# ---------------------------
-if HAS_TRANSFORMERS and HAS_TORCH:
-    class TextDataset(torch.utils.data.Dataset):
-        def __init__(self, encodings, labels=None):
-            self.encodings = encodings
-            self.labels = labels
-        def __getitem__(self, idx):
-            item = {k: torch.tensor(v[idx]) for k,v in self.encodings.items()}
-            if self.labels is not None:
-                item["labels"] = torch.tensor(self.labels[idx])
-            return item
-        def __len__(self):
-            return len(self.encodings["input_ids"])
-
-    def train_text_model(texts: List[str], labels: List[int], work_dir: Path, logs_path: str, model_name="distilbert-base-uncased", epochs=3):
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        enc = tokenizer(texts, truncation=True, padding=True, max_length=128)
-        idxs = np.arange(len(texts))
-        np.random.shuffle(idxs)
-        split = int(0.8 * len(texts))
-        train_idx, val_idx = idxs[:split], idxs[split:]
-        train_enc = {k:[v[i] for i in train_idx] for k,v in enc.items()}
-        val_enc = {k:[v[i] for i in val_idx] for k,v in enc.items()}
-        train_labels = [labels[i] for i in train_idx]
-        val_labels = [labels[i] for i in val_idx]
-        train_ds = TextDataset(train_enc, train_labels)
-        val_ds = TextDataset(val_enc, val_labels)
-        num_labels = len(set(labels))
-        model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
-        training_args = TrainingArguments(
-            output_dir=str(work_dir/"tf_out"),
-            num_train_epochs=epochs,
-            per_device_train_batch_size=8,
-            per_device_eval_batch_size=8,
-            logging_steps=10,
-            save_strategy="no",
-            evaluation_strategy="epoch",
-            disable_tqdm=True
-        )
-        def compute_metrics(p):
-            preds = np.argmax(p.predictions, axis=1)
-            acc = (preds == p.label_ids).mean()
-            prec = precision_score(p.label_ids, preds, average="weighted", zero_division=0)
-            rec = recall_score(p.label_ids, preds, average="weighted", zero_division=0)
-            f1 = f1_score(p.label_ids, preds, average="weighted", zero_division=0)
-            return {"accuracy":float(acc), "precision":float(prec), "recall":float(rec), "f1":float(f1)}
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=val_ds,
-            compute_metrics=compute_metrics
-        )
-        trainer.train()
-        metrics = trainer.evaluate()
-        model.save_pretrained(str(work_dir/"hf_model"))
-        tokenizer.save_pretrained(str(work_dir/"hf_model"))
-        return model, metrics
-
-# ---------------------------
-# Tabular training
-# ---------------------------
-def train_tabular_model(df: pd.DataFrame, work_dir: Path, logs_path: str, sample_weight: Optional[np.ndarray]=None):
-    def derive_target_column_local(df):
-        cols = list(df.columns)
-        lower = [c.lower() for c in cols]
-        for cand in ("target","label","y","is_fraud","isfraud"):
-            if cand in lower:
-                return cols[lower.index(cand)]
-        for c in reversed(cols):
-            lc = c.lower()
-            if not (lc.endswith("id") or lc == "index"):
-                return c
-        return cols[-1]
-    if df.empty:
-        raise RuntimeError("Empty dataframe")
-    target_col = derive_target_column_local(df)
-    X = df.drop(columns=[target_col], errors="ignore").select_dtypes(include=[np.number])
-    y = df[target_col] if target_col in df.columns else None
-    if y is None:
-        raise RuntimeError("No target column found for supervised tabular training")
-    X = X.fillna(X.median())
-    if hasattr(y, "astype"):
-        try:
-            y = y.astype(float)
-        except Exception:
-            pass
-    try:
-        task = "classification" if (hasattr(y, "nunique") and y.nunique() <= 10) else "regression"
-    except Exception:
-        task = "classification"
-    metrics = {}
-    model = None
-    if task == "classification":
-        y_clean = y.dropna()
-        X_aligned = X.loc[y_clean.index]
-        X_train, X_test, y_train, y_test = train_test_split(X_aligned, y_clean, test_size=0.2, stratify=(y_clean if y_clean.nunique()>1 else None), random_state=42)
-        try:
-            model = LogisticRegression(max_iter=2000, random_state=42).fit(X_train, y_train, sample_weight=(None if sample_weight is None else sample_weight[:len(y_train)]))
-        except Exception:
-            model = RandomForestClassifier(n_estimators=100, random_state=42).fit(X_train, y_train)
-        preds = model.predict(X_test)
-        metrics = {
-            "accuracy": float(accuracy_score(y_test,preds)),
-            "precision": float(precision_score(y_test,preds,average="weighted", zero_division=0)),
-            "recall": float(recall_score(y_test,preds,average="weighted", zero_division=0)),
-            "f1": float(f1_score(y_test,preds,average="weighted", zero_division=0))
-        }
-        try:
-            cm = confusion_matrix(y_test, preds)
-            plt.imshow(cm); plt.title("Confusion Matrix"); plt.colorbar()
-            plt.savefig(work_dir/"confusion_matrix.png"); plt.close()
-        except Exception:
-            pass
-    else:
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        model = LinearRegression().fit(X_train, y_train)
-        preds = model.predict(X_test)
-        metrics = {"mae": float(mean_absolute_error(y_test,preds)), "rmse": float(mean_squared_error(y_test,preds, squared=False))}
-    joblib.dump(model, str(work_dir/"model.pkl"))
-    return model, metrics
-
-def aaar_plus_tabular(df: pd.DataFrame, bucket: str, project_prefix: str, latest_v: int,
-                      work_dir: Path, logs_local: Path) -> Tuple[Any, Dict[str, Any]]:
-    df = merge_failed_tests_into_df(df, bucket, project_prefix, latest_v, work_dir, logs_local)
-    model, metrics = train_tabular_model(df, work_dir, str(logs_local))
-    try:
-        acc = float(metrics.get("accuracy", 0.0))
-        if acc < 0.85 and "label" in df.columns:
-            y = df["label"]
-            X = df.drop(columns=["label"]).select_dtypes(include=[np.number]).fillna(0)
-            Xb, yb = oversample_minority_classes(X, y)
-            df_bal = pd.concat([Xb, yb.rename("label")], axis=1)
-            model, metrics = train_tabular_model(df_bal, work_dir, str(logs_local))
-    except Exception:
-        pass
-    return model, metrics
-
-# ---------------------------
-# Merge failed testcases
-# ---------------------------
-def merge_failed_tests_into_df(df: pd.DataFrame, bucket: str, project_prefix: str, latest_v: int, work_dir: Path, logs_local: Path) -> pd.DataFrame:
-    failed_rows = []
-    if HAS_BOTO3 and latest_v > 0:
-        try:
-            for v in range(max(1, latest_v-2), latest_v+1):
-                key_tests = f"{project_prefix}artifacts/versions/v{v}/tests.csv"
-                if s3_key_exists(bucket, key_tests):
-                    tmp = work_dir/f"tests_v{v}.csv"
-                    s3_download(bucket, key_tests, str(tmp))
-                    tdf = safe_read_csv(str(tmp))
-                    if not tdf.empty:
-                        lc = [c.lower() for c in tdf.columns]
-                        if "result" in lc:
-                            rc = tdf.columns[lc.index("result")]
-                            frows = tdf[tdf[rc].astype(str).str.lower() != "pass"]
-                            if not frows.empty:
-                                failed_rows.append(frows)
-            if failed_rows:
-                all_failed = pd.concat(failed_rows, ignore_index=True, sort=False)
-                common = [c for c in all_failed.columns if c in df.columns]
-                if common:
-                    df = pd.concat([df, all_failed[common]], ignore_index=True, sort=False)
-                    with open(logs_local, "a") as lf:
-                        lf.write(f"[{now_ts()}] Injected {len(all_failed)} failed testcase rows into dataset\n")
-        except Exception as e:
-            with open(logs_local, "a") as lf:
-                lf.write(f"[{now_ts()}] Failed merging failed testcases: {e}\n")
-    return df
-
-# ---------------------------
-# Entrypoint
-# ---------------------------
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--job_id", required=True)
-    p.add_argument("--s3_report", required=True)
-    p.add_argument("--datasets", nargs="+", required=True)
-    p.add_argument("--s3_bucket", default=None)
-    p.add_argument("--epochs", type=int, default=3)
-    return p.parse_args()
-
-def main():
-    args = parse_args()
-    job_id = args.job_id
-    s3_report = args.s3_report
-    dataset_paths = args.datasets
-    epochs = args.epochs
-
-    bucket, key = parse_s3(s3_report)
-    parts = key.split("/")
-    if len(parts) < 3:
-        print("Expected s3 path like bucket/username/project/jobid/retrain_report.json")
-        sys.exit(1)
-    username, project = parts[0], parts[1]
-    project_prefix = f"{username}/{project}/"
-
-    latest_v, prev_metrics = load_previous_version_metrics(bucket, project_prefix)
-    new_v = latest_v + 1
-    new_v_name = f"v{new_v}"
-    version_prefix = f"{project_prefix}artifacts/versions/{new_v_name}/"
-    artifact_prefix = f"{version_prefix}runs/run_{job_id}/"
-
-    work = tempfile.mkdtemp(prefix=f"retrain_{job_id}_")
-    work_dir = Path(work)
-    logs_local = work_dir/"logs.txt"
-    with open(logs_local, "a") as lf:
-        lf.write(f"[{now_ts()}] Starting retrain {job_id} for {username}/{project}\n")
-
-    local_datasets = []
-    for ds in dataset_paths:
-        try:
-            if ds.startswith("s3://") and HAS_BOTO3:
-                b,k = parse_s3(ds)
-                local_path = str(work_dir/Path(k).name)
-                s3_download(b,k,local_path)
-                local_datasets.append(local_path)
-            else:
-                if os.path.exists(ds):
-                    local_datasets.append(ds)
-                else:
-                    with open(logs_local,"a") as lf:
-                        lf.write(f"[{now_ts()}] Dataset not found: {ds}\n")
-        except Exception as e:
-            with open(logs_local,"a") as lf:
-                lf.write(f"[{now_ts()}] Failed to fetch dataset {ds}: {e}\n")
-    if not local_datasets:
-        print("No datasets found; aborting")
-        sys.exit(1)
-
-    primary = local_datasets[0]
-    modality = detect_modality_from_path(primary)
-    model = None
-    metrics = {}
-    promoted = better_than_previous(metrics, prev_metrics)
-
-    try:
-        if modality in ("tabular","json"):
-            df = safe_json_normalize(primary) if modality == "json" else safe_read_csv(primary)
-            model, metrics = aaar_plus_tabular(df, bucket, project_prefix, latest_v, work_dir, logs_local)
-
-        elif modality in ("image_folder","image_file"):
-            if primary.startswith("s3://") and HAS_BOTO3:
-                b,k = parse_s3(primary)
-                objs = s3_list_keys(b, k)
-                base_local = work_dir/"images"
-                for obj in objs:
-                    if obj.endswith("/"): continue
-                    rel = obj[len(k):].lstrip("/")
-                    dest = base_local/rel
-                    ensure_dir(str(dest.parent))
-                    s3_download(b, obj, str(dest))
-                local_image_dir = str(base_local)
-            else:
-                if os.path.isdir(primary):
-                    local_image_dir = primary
-                else:
-                    tmpdir = work_dir/"images"/"class_0"
-                    ensure_dir(str(tmpdir))
-                    shutil.copy(primary, str(tmpdir/Path(primary).name))
-                    local_image_dir = str(work_dir/"images")
-            if not HAS_TORCH:
-                raise RuntimeError("PyTorch/torchvision not available for image training")
-            model, metrics, classes = train_image_model(local_image_dir, work_dir, str(logs_local), epochs=epochs)
-
-        elif modality == "text":
-            texts=[]; labels=[]
-            try:
-                df = safe_read_csv(primary)
-                if not df.empty and ("text" in df.columns or "sentence" in df.columns):
-                    text_col = "text" if "text" in df.columns else "sentence"
-                    label_col = "label" if "label" in df.columns else None
-                    if label_col is None:
-                        raise RuntimeError("text csv missing 'label' column")
-                    texts = df[text_col].astype(str).tolist()
-                    labels = df[label_col].astype(int).tolist()
-                else:
-                    with open(primary) as f:
-                        for ln in f:
-                            ln = ln.strip()
-                            if not ln: continue
-                            if "\t" in ln:
-                                t,l = ln.split("\t",1)
-                            elif "," in ln:
-                                t,l = ln.rsplit(",",1)
-                            else:
-                                continue
-                            texts.append(t)
-                            labels.append(int(l))
-            except Exception as e:
-                raise RuntimeError(f"Failed to read text dataset: {e}")
-            if not HAS_TRANSFORMERS or not HAS_TORCH:
-                raise RuntimeError("transformers or torch not available for text training")
-            model, metrics = train_text_model(texts, labels, work_dir, str(logs_local), epochs=epochs)
-
+        if cat and res:
+            mask = (dfm[cat].astype(str).str.lower() == "prediction") & (dfm[res].astype(str).str.upper() == "FAIL")
+            rows = dfm[mask]
         else:
-            raise RuntimeError(f"Unknown modality: {modality}")
+            rows = dfm.iloc[0:0]  # empty
+
+        scenarios = []
+        for _, r in rows.iterrows():
+            inp = r.get("input"); exp = r.get("expected")
+            if not (isinstance(inp, str) and isinstance(exp, str)): continue
+            scenarios.append({
+                "name": str(r.get("name", Path(inp).name)),
+                "function": "predict",
+                "input": inp,
+                "expected": exp
+            })
+
+        with open(tests_yaml, "w") as f:
+            yaml.safe_dump({"scenarios": scenarios}, f, sort_keys=False)
+        log_append(logs, f"Merged tests rows={len(dfm)} scenarios={len(scenarios)}")
+        return merged_csv, tests_yaml
+    except Exception as e:
+        log_append(logs, f"[WARN] tests merge skipped ({e}); writing empty tests.yaml")
+        merged_csv.write_text("name,input,category,severity,expected,predicted,result\n")
+        tests_yaml.write_text("scenarios: []\n")
+        return merged_csv, tests_yaml
+
+# ─────────────────── Augment ───────────────────
+def augment_from_failed(job_dir, merged_csv, logs):
+    if pd is None: return
+    try:
+        df = pd.read_csv(merged_csv)
+    except Exception:
+        return
+    def has(c): return c in df.columns
+    if not (has("category") and has("result") and has("input") and has("expected")):
+        return
+    mask = (df["category"].astype(str).str.lower() == "prediction") & (df["result"].astype(str).str.upper() == "FAIL")
+    failed = df[mask]
+    if failed.empty:
+        log_append(logs, "No failed samples to augment.")
+        return
+    train_root = ensure_dir(job_dir / "images" / "train")
+    added = 0
+    for _, r in failed.iterrows():
+        inp, exp = str(r["input"]).strip(), str(r["expected"]).strip()
+        if not inp or not exp: continue
+        src = job_dir / inp
+        if not src.exists():
+            alt = job_dir / "images" / Path(inp).name
+            if alt.exists(): src = alt
+            else: continue
+        tgt_dir = ensure_dir(train_root / exp)
+        for i in range(max(1, AUG_FAIL_DUP_K)):
+            shutil.copyfile(src, tgt_dir / f"aug_{Path(src).stem}_dup{i}{Path(src).suffix}")
+            added += 1
+    log_append(logs, f"Augmented {added} samples.")
+
+# ─────────────────── Train ───────────────────
+def run_train(job_dir, logs):
+    """
+    Executes the user's train.py inside the job_dir.
+    Ensures we don't crash if user saved only a state_dict or nothing at all.
+    """
+    train_py = job_dir / "train.py"
+    if not train_py.exists():
+        raise RuntimeError("train.py missing at job root")
+
+    # ── Log current directory structure for debugging ──
+    log_append(logs, "=== Directory layout before training ===")
+    for root, _, files in os.walk(job_dir):
+        rel = os.path.relpath(root, job_dir)
+        log_append(logs, f"{rel}/ -> {files}")
+
+    # ── Run user’s training script ──
+    run_live(["python3", str(train_py)], str(job_dir), logs, TRAIN_TIMEOUT_SEC)
+
+    # ── Handle model artifacts ──
+    model_pt = job_dir / "model.pt"
+    model_pkl = job_dir / "model.pkl"
+
+    if model_pt.exists():
+        log_append(logs, "[INFO] model.pt found. (Might be a state_dict only — continuing.)")
+        return model_pt
+
+    if model_pkl.exists():
+        log_append(logs, "[INFO] model.pkl found. Using it as model artifact.")
+        return model_pkl
+
+    # ── If no model file produced, create a placeholder to avoid pipeline failure ──
+    log_append(logs, "[WARN] No model.pt or model.pkl produced by train.py. "
+                     "Creating placeholder so pipeline can continue.")
+    placeholder = job_dir / "model.pt"
+    placeholder.write_text("NO_MODEL_SAVED")
+    return placeholder
+
+
+# ─────────────────── Evaluate ───────────────────
+def run_driver_or_min_eval(job_dir, tests_yaml, logs):
+    driver_py = job_dir / "driver.py"
+    if driver_py.exists():
+        run_live(["python3", str(driver_py), "--base_dir", "."],
+                 str(job_dir), logs, DRIVER_TIMEOUT_SEC)
+
+# ─────────────────── Uploads ───────────────────
+def upload_outputs(job_dir, save_base, model_path, logs):
+    mapping = {}
+    model_key = f"{save_base}/{'model.pt' if model_path.suffix == '.pt' else 'model.pkl'}"
+    s3_upload_file(model_path, S3_BUCKET, model_key)
+    mapping["model"] = f"s3://{S3_BUCKET}/{model_key}"
+    retr = f"{save_base}/retrained"
+    for name in ["logs.txt", "metrics.json", "confusion_matrix.png", "manifest.json",
+                 "tests.csv", "tests_merged.csv", "final_retrain_report.json", "tests.yaml"]:
+        p = job_dir / name
+        if p.exists():
+            s3_upload_file(p, S3_BUCKET, f"{retr}/{name}")
+            mapping[name] = f"s3://{S3_BUCKET}/{retr}/{name}"
+    return mapping
+
+def write_manifest(job_dir, model_path):
+    arts = []
+    for n in ["logs.txt", "metrics.json", "confusion_matrix.png", "manifest.json",
+              "tests.csv", "tests_merged.csv", "tests.yaml"]:
+        p = job_dir / n
+        if p.exists():
+            arts.append({"name": n, "sha256": sha256_file(p), "size": p.stat().st_size})
+    if model_path.exists():
+        arts.append({"name": model_path.name, "sha256": sha256_file(model_path),
+                     "size": model_path.stat().st_size})
+    (job_dir / "manifest.json").write_text(json.dumps({"artifacts": arts}, indent=2))
+
+def write_final_report(job_dir, job_id, save_base, s3_map, status, error=""):
+    rep = {"jobId": job_id, "saveBase": save_base, "status": status,
+           "error": error, "artifacts": s3_map, "timestamp": now_ts()}
+    (job_dir / "final_retrain_report.json").write_text(json.dumps(rep, indent=2))
+
+# ─────────────────── MAIN ───────────────────
+def main():
+    job_id, save_base, s3_keys = parse_args()
+    job_dir = ensure_dir(JOBS_ROOT / f"job_{job_id}")
+    logs = job_dir / "logs.txt"
+    log_append(logs, f"Start retrain job={job_id} keys={s3_keys}")
+
+    try:
+        meta = download_inputs(job_dir, s3_keys, logs)
+        merged_csv, tests_yaml = merge_tests_and_build_yaml(job_dir, meta["tests_csv_paths"], logs)
+        augment_from_failed(job_dir, merged_csv, logs)
+
+        model_path = run_train(job_dir, logs)
+        log_append(logs, f"Model saved at {model_path}")
+
+        run_driver_or_min_eval(job_dir, tests_yaml, logs)
+
+        write_manifest(job_dir, model_path)
+        s3_map = upload_outputs(job_dir, save_base, model_path, logs)
+
+        write_final_report(job_dir, job_id, save_base, s3_map, "SUCCESS")
+        s3_upload_file(job_dir / "final_retrain_report.json", S3_BUCKET,
+                       f"{save_base}/retrained/final_retrain_report.json")
+        log_append(logs, "=== Retrain SUCCESS ===")
 
     except Exception as e:
-        with open(logs_local,"a") as lf:
-            lf.write(f"[{now_ts()}] Training FAILED: {e}\n")
-        report = {
-            "jobId": job_id,
-            "new_version": new_v_name,
-            "promoted": False,
-            "status": "FAILED",
-            "metrics": {},
-            "error": str(e),
-            "timestamp": now_ts(),
-            "artifact_prefix": artifact_prefix
-        }
-        report_local = work_dir/f"final_retrain_report_{job_id}.json"
-        with open(report_local, "w") as rf:
-            json.dump(report, rf, indent=2)
+        log_append(logs, f"[FAILED] {e}")
+        write_final_report(job_dir, job_id, save_base, {}, "FAILED", str(e))
         try:
-            if HAS_BOTO3:
-                s3_upload(str(report_local), s3_report)
+            s3_upload_file(job_dir / "final_retrain_report.json", S3_BUCKET,
+                           f"{save_base}/retrained/final_retrain_report.json")
         except Exception:
             pass
-        print("FAILED:", e)
         sys.exit(1)
-
-    run_local_dir = work_dir/"artifacts"/"versions"/new_v_name/"runs"/f"run_{job_id}"
-    ensure_dir(str(run_local_dir))
-    try:
-        shutil.copyfile(str(logs_local), str(run_local_dir/"logs.txt"))
-    except Exception:
-        pass
-    try:
-        if (work_dir/"model.pkl").exists():
-            shutil.copyfile(str(work_dir/"model.pkl"), str(run_local_dir/"model.pkl"))
-        if (work_dir/"model.pt").exists():
-            shutil.copyfile(str(work_dir/"model.pt"), str(run_local_dir/"model.pt"))
-        if (work_dir/"hf_model").exists():
-            shutil.copytree(str(work_dir/"hf_model"), str(run_local_dir/"hf_model"), dirs_exist_ok=True)
-        if (work_dir/"confusion_matrix.png").exists():
-            shutil.copyfile(str(work_dir/"confusion_matrix.png"), str(run_local_dir/"confusion_matrix.png"))
-    except Exception:
-        pass
-    try:
-        metrics_local = run_local_dir/"metrics.json"
-        with open(metrics_local,"w") as mf:
-            json.dump(metrics, mf, indent=2)
-    except Exception:
-        pass
-
-    report = {
-        "jobId": job_id,
-        "new_version": new_v_name,
-        "promoted": promoted,
-        "status": "SUCCESS",
-        "metrics": metrics,
-        "timestamp": now_ts(),
-        "artifact_prefix": artifact_prefix,
-    }
-    report_local = run_local_dir/"retrain_report.json"
-    with open(report_local,"w") as rf:
-        json.dump(report, rf, indent=2)
-
-    if HAS_BOTO3:
-        for root, _, files in os.walk(run_local_dir):
-            for f in files:
-                local_f = os.path.join(root,f)
-                rel = os.path.relpath(local_f, run_local_dir)
-                s3_path = f"s3://{bucket}/{version_prefix}runs/run_{job_id}/{rel}"
-                try:
-                    s3_upload(local_f, s3_path)
-                except Exception as e:
-                    with open(logs_local,"a") as lf:
-                        lf.write(f"[{now_ts()}] Failed upload {local_f} -> {s3_path}: {e}\n")
-        try:
-            s3_upload(str(report_local), f"s3://{bucket}/{version_prefix}retrain_report.json")
-            s3_upload(str(metrics_local), f"s3://{bucket}/{version_prefix}metrics.json")
-            if (run_local_dir/"model.pkl").exists():
-                s3_upload(str(run_local_dir/"model.pkl"), f"s3://{bucket}/{version_prefix}model.pkl")
-            if (run_local_dir/"model.pt").exists():
-                s3_upload(str(run_local_dir/"model.pt"), f"s3://{bucket}/{version_prefix}model.pt")
-            if (run_local_dir/"hf_model").exists():
-                for root, _, files in os.walk(run_local_dir/"hf_model"):
-                    for f in files:
-                        local_f = os.path.join(root,f)
-                        rel = os.path.relpath(local_f, run_local_dir/"hf_model")
-                        s3_upload(local_f, f"s3://{bucket}/{version_prefix}hf_model/{rel}")
-        except Exception as e:
-            with open(logs_local,"a") as lf:
-                lf.write(f"[{now_ts()}] Warning uploading canonical artifacts: {e}\n")
-
-    final_report = run_local_dir/"final_retrain_report.json"
-    with open(final_report, "w") as f:
-        json.dump(report, f, indent=2)
-    try:
-        if HAS_BOTO3:
-            s3_upload(str(final_report), s3_report)
-    except Exception:
-        pass
-
-    print(f"[AAAR+] Retrain finished. Version {new_v_name} created. promoted={promoted}")
-    with open(logs_local,"a") as lf:
-        lf.write(f"[{now_ts()}] Retrain finished. Version {new_v_name} created. promoted={promoted}\n")
-    sys.exit(0)
+    finally:
+        log_append(logs, "Job complete; leaving workspace for debugging.")
 
 if __name__ == "__main__":
     main()

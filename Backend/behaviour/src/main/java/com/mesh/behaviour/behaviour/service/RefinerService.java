@@ -5,9 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mesh.behaviour.behaviour.dto.StartRunRequest;
 import com.mesh.behaviour.behaviour.model.Project;
-import com.mesh.behaviour.behaviour.model.Run;
+import com.mesh.behaviour.behaviour.model.ScenarioPrompt;
 import com.mesh.behaviour.behaviour.repository.ProjectRepository;
-import com.mesh.behaviour.behaviour.repository.RunRepository;
 import com.mesh.behaviour.behaviour.util.S3KeyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -25,69 +24,87 @@ public class RefinerService {
     private final S3Service s3;
     private final LlmService llm;
     private final ProjectRepository projects;
-    private final RunRepository runs;
-    private final RunService runService;
+    private final RunService runService;                // still needed for autoRun
     private final ScenarioService scenarioService;
 
     private final ObjectMapper om = new ObjectMapper();
 
     /**
-     * Refine tests for a run/project and activate canonical tests.yaml in version folder.
+     * Main entry point: Refine tests using a specific promptId
      */
-    public Map<String, Object> refineAndActivateTests(
+    public Map<String, Object> refineAndActivateByPrompt(
             String username,
             String projectName,
             String versionLabel,
-            long runId,
-            String userFeedback,
+            long promptId,
             boolean autoRun
     ) {
         if (!StringUtils.hasText(versionLabel)) {
-            throw new IllegalArgumentException("versionLabel is required - RefinerService cannot create versions");
+            throw new IllegalArgumentException("versionLabel is required");
         }
 
+        // ✅ Fetch the selected prompt
+        ScenarioPrompt prompt = scenarioService
+                .listPrompts(username, projectName, versionLabel)
+                .stream()
+                .filter(p -> p.getId() == promptId)
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Prompt not found: " + promptId));
+
+        // Strip [user] prefix if present
+        String userPrompt = prompt.getMessage();
+        if (userPrompt != null && userPrompt.startsWith("[user]")) {
+            userPrompt = userPrompt.substring(6).trim();
+        }
+
+        return refineAndActivateCore(username, projectName, versionLabel, userPrompt, autoRun);
+    }
+
+    /**
+     * Core refinement logic – builds context and sends latest prompt to LLM
+     */
+    private Map<String, Object> refineAndActivateCore(
+            String username,
+            String projectName,
+            String versionLabel,
+            String userPrompt,
+            boolean autoRun
+    ) {
         Project project = projects.findByUsernameAndProjectName(username, projectName)
                 .orElseThrow(() -> new IllegalArgumentException("Project not found"));
-        Run run = runs.findById(runId)
-                .orElseThrow(() -> new IllegalArgumentException("Run not found: " + runId));
 
-        if (!username.equalsIgnoreCase(run.getUsername()) ||
-                !projectName.equalsIgnoreCase(run.getProjectName())) {
-            throw new IllegalArgumentException("Run does not belong to specified project");
+        // Save prompt again for traceability
+        if (StringUtils.hasText(userPrompt)) {
+            scenarioService.savePrompt(username, projectName, versionLabel, userPrompt, null);
         }
 
-        if (StringUtils.hasText(userFeedback)) {
-            scenarioService.savePrompt(username, projectName, versionLabel, userFeedback, runId);
-        }
-
-        // Root = project root
+        // Resolve S3 base
         String root = S3KeyUtil.keyOf(project.getS3Prefix());
         while (root.startsWith("/")) root = root.substring(1);
         if (root.contains("/artifacts/versions/")) {
             root = root.substring(0, root.indexOf("/artifacts/versions/"));
         }
 
-        // Use provided version folder - NO VERSION CREATION
+        // Version folder
         String versionBase = S3KeyUtil.join(root, "artifacts/versions", versionLabel);
-        if (!versionBase.endsWith("/")) versionBase = versionBase + "/";
+        if (!versionBase.endsWith("/")) versionBase += "/";
 
-        // Behaviour tests folder inside version
+        // Behaviour-tests folder
         String behaviourBase = S3KeyUtil.join(versionBase, "behaviour-tests/");
         if (!s3.existsPrefix(behaviourBase)) {
             s3.putString(S3KeyUtil.join(behaviourBase, ".keep"), "", "text/plain");
             log.info("Created behaviour-tests/ folder under {}", versionBase);
         }
 
-        log.info("RefinerService working within version: {} at path: {}", versionLabel, versionBase);
+        log.info("RefinerService working within version: {} at {}", versionLabel, versionBase);
 
+        // Read optional metadata
         Map<String, Object> hints = readJsonSafe(S3KeyUtil.join(versionBase, "refiner_hints.json"));
         Map<String, Object> metrics = readJsonSafe(S3KeyUtil.join(versionBase, "metrics.json"));
         Map<String, Object> manifest = readJsonSafe(S3KeyUtil.join(versionBase, "manifest.json"));
         Set<String> issues = extractIssues(hints, manifest);
 
-        String chatHistory = scenarioService.buildChatHistory(username, projectName, versionLabel, 12, 4000);
-
-        // Context bundle
+        // Build context
         String context = buildContextBundle(root, List.of(
                 "pre-processed/train.py",
                 "pre-processed/predict.py",
@@ -97,11 +114,11 @@ public class RefinerService {
         ));
         context += buildContextBundle(versionBase, List.of("driver.py", "tests.yaml"));
 
-        String baseBrief = buildBrief(issues, metrics, manifest, chatHistory);
-
+        // ✅ Compose brief with ONLY the latest user prompt
+        String baseBrief = buildBrief(issues, metrics, manifest, userPrompt);
         String label = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
 
-        // === Generate once from Gemini and accept it (no validation, no fallback) ===
+        // Generate tests.yaml with Gemini
         Map<String, String> gen = llm.generateTestsOnlyToS3(
                 baseBrief,
                 context,
@@ -111,19 +128,18 @@ public class RefinerService {
         String versionKey = gen.get("versionKey");
         String yaml = s3.getString(versionKey);
 
-        // Archive old tests.yaml before overwriting
+        // Archive old canonical YAML
         String canonicalKey = S3KeyUtil.join(versionBase, "tests.yaml");
         if (s3.exists(canonicalKey)) {
             String oldYaml = s3.getString(canonicalKey);
-            String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
-            String archiveKey = S3KeyUtil.join(behaviourBase, "tests_" + timestamp + ".yaml");
+            String ts = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+            String archiveKey = S3KeyUtil.join(behaviourBase, "tests_" + ts + ".yaml");
             s3.putString(archiveKey, oldYaml, "text/yaml");
-            log.info("Archived old tests.yaml to: {}", archiveKey);
+            log.info("Archived previous tests.yaml to {}", archiveKey);
         }
 
-        // Overwrite canonical tests.yaml inside current version folder
+        // Save new canonical YAML
         s3.putString(canonicalKey, yaml, "text/yaml");
-
         project.setTestsKey(canonicalKey);
         projects.save(project);
 
@@ -132,6 +148,7 @@ public class RefinerService {
         out.put("canonicalKey", canonicalKey);
         out.put("activated", true);
 
+        // Auto-run pipeline if requested
         if (autoRun) {
             StartRunRequest req = new StartRunRequest();
             req.setUsername(username);
@@ -142,33 +159,10 @@ public class RefinerService {
             out.put("newRunId", view.getRunId());
         }
 
-        writeRefinementReceipt(root, behaviourBase, versionKey, canonicalKey, issues, chatHistory);
         return out;
     }
 
-    private void writeRefinementReceipt(
-            String root,
-            String behaviourBase,
-            String versionKey,
-            String canonicalKey,
-            Set<String> issues,
-            String chatHistory
-    ) {
-        try {
-            Map<String, Object> rec = new LinkedHashMap<>();
-            rec.put("root", root);
-            rec.put("behaviourBase", behaviourBase);
-            rec.put("versionKey", versionKey);
-            rec.put("canonicalKey", canonicalKey);
-            rec.put("issues", issues);
-            rec.put("chatHistory", chatHistory);
-            rec.put("timestamp", System.currentTimeMillis());
-            String outKey = S3KeyUtil.join(behaviourBase, "refinement_receipt.json");
-            s3.putString(outKey, om.writeValueAsString(rec), "application/json");
-        } catch (Exception ignored) {}
-    }
-
-    /* ==================== Helpers ==================== */
+    /* ---------------------- Helpers ---------------------- */
 
     private Map<String, Object> readJsonSafe(String key) {
         try {
@@ -210,15 +204,29 @@ public class RefinerService {
     private String buildBrief(Set<String> issues,
                               Map<String, Object> metrics,
                               Map<String, Object> manifest,
-                              String chatHistory) {
+                              String userPrompt) {
+
         StringBuilder b = new StringBuilder();
-        b.append("You are refining a tests.yaml for behaviour testing.\n");
-        b.append("Rules: output ONLY YAML with tests: and scenarios:.\n");
-        if (metrics != null && !metrics.isEmpty()) b.append("Known metrics: ").append(metrics).append("\n");
-        if (issues != null && !issues.isEmpty()) b.append("Known issues: ").append(issues).append("\n");
-        if (chatHistory != null && !chatHistory.isBlank()) b.append("Recent notes: ").append(chatHistory).append("\n");
+        b.append("You are generating ONLY a tests.yaml for behaviour testing.\n");
+        b.append("All instructions come strictly from the USER PROMPT below.\n");
+        b.append("Do NOT add default tests unless the user explicitly asks.\n");
+        b.append("Use dataset paths only from CONTEXT.\n");
+        b.append("Output must start with:\n");
+        b.append("tests:\n  scenarios:\n");
+        b.append("Use double quotes for all string values.\n");
+
+        if (StringUtils.hasText(userPrompt)) {
+            b.append("USER PROMPT: ").append(userPrompt).append("\n");
+        }
+
+        if (metrics != null && !metrics.isEmpty())
+            b.append("Known metrics: ").append(metrics).append("\n");
+        if (issues != null && !issues.isEmpty())
+            b.append("Known issues: ").append(issues).append("\n");
+
         return b.toString();
     }
+
 
     private String safeString(Object o) {
         return o == null ? null : String.valueOf(o);

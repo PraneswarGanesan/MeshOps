@@ -1,46 +1,118 @@
-#!/bin/bash
-set -euo pipefail
-# Usage: run_retrain.sh JOB_ID S3_REPORT [datasets...]
-JOB_ID=$1
-S3_REPORT=$2
-shift 2
-DATASETS=("$@")
+#!/usr/bin/env bash
+set -euxo pipefail
 
-WORKDIR="/opt/meshops/work_${JOB_ID}"
-mkdir -p "$WORKDIR"
+# ----------------------------
+# Input arguments
+# ----------------------------
+JOB_ID="$1"                # Unique job ID
+S3_REPORT="$2"             # S3 path for final retrain report
+USER_REQ_FILE="$3"         # Optional path to user's custom requirements file (S3 or relative key)
+shift 3
+USER_PATHS="$@"            # Remaining args: user's code/data files
 
-# Local log file
-LOG_FILE="$WORKDIR/train.log"
-: > "$LOG_FILE"
+# ----------------------------
+# Environment Variables
+# ----------------------------
+AWS_S3_BUCKET="${AWS_S3_BUCKET:-}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
 
-echo "[AAAR+] Launching retrain job $JOB_ID" | tee -a "$LOG_FILE"
+# ----------------------------
+# Directories
+# ----------------------------
+WORK_DIR="/jobs/job_${JOB_ID}"
+VENV_DIR="${WORK_DIR}/venv"
 
-# Build datasets args (quote properly)
-DATASET_ARGS=""
-for d in "${DATASETS[@]}"; do
-  DATASET_ARGS+=" \"$d\""
-done
+mkdir -p "${WORK_DIR}"
 
-# Run retrain.py and stream stdout/stderr to log (preserve exit code)
-python3 /opt/meshops/retrain.py \
-  --job_id "$JOB_ID" \
-  --s3_report "$S3_REPORT" \
-  --datasets $DATASET_ARGS \
-  2>&1 | tee -a "$LOG_FILE"
-RC=${PIPESTATUS[0]:-0}
+echo "[INFO] === Starting retrain job: ${JOB_ID} ==="
+echo "[INFO] Workspace: ${WORK_DIR}"
+echo "[INFO] User requirements file: ${USER_REQ_FILE:-<none>}"
+echo "[INFO] AWS_S3_BUCKET: ${AWS_S3_BUCKET:-<unset>}"
+echo "[INFO] AWS_REGION: ${AWS_REGION}"
 
-if command -v aws >/dev/null 2>&1; then
-  # Upload raw log right next to retrain_report.json
-  aws s3 cp "$LOG_FILE" "${S3_REPORT}.log" || true
+# ----------------------------
+# 1. Create Python virtual environment
+# ----------------------------
+python3 -m venv "${VENV_DIR}"
+source "${VENV_DIR}/bin/activate"
 
-  # Derive bucket/prefix from S3_REPORT
-  BUCKET=$(echo "$S3_REPORT" | cut -d/ -f3)
-  KEY=$(echo "$S3_REPORT" | cut -d/ -f4-)
-  BASE_PREFIX=$(dirname "$KEY")
+# ----------------------------
+# 2. Upgrade pip inside venv
+# ----------------------------
+pip install --upgrade pip
 
-  # Also copy log into the version run folder (canonical)
-  # Example: artifacts/versions/vN/runs/run_JOBID/logs.txt
-  aws s3 cp "$LOG_FILE" "s3://$BUCKET/$BASE_PREFIX/logs.txt" || true
+# ----------------------------
+# 3. Install base requirements from Automesh code package
+# ----------------------------
+if [ -f "/opt/meshops/requirements.txt" ]; then
+    echo "[INFO] Installing base requirements..."
+    pip install -r /opt/meshops/requirements.txt
+else
+    echo "[WARN] No base requirements.txt found in /opt/meshops"
 fi
 
-exit $RC
+# ----------------------------
+# 4. Handle user-provided requirements file
+# ----------------------------
+if [ -n "${USER_REQ_FILE}" ]; then
+    echo "[INFO] Detected user requirements file: ${USER_REQ_FILE}"
+    LOCAL_USER_REQ="${WORK_DIR}/user_requirements.txt"
+
+    # If full S3 path provided
+    if [[ "${USER_REQ_FILE}" == s3://* ]]; then
+        SRC_PATH="${USER_REQ_FILE}"
+    else
+        # Treat as relative key — prepend bucket
+        if [ -z "${AWS_S3_BUCKET}" ]; then
+            echo "[ERROR] AWS_S3_BUCKET is not set; cannot fetch ${USER_REQ_FILE}"
+            SRC_PATH=""
+        else
+            SRC_PATH="s3://${AWS_S3_BUCKET}/${USER_REQ_FILE}"
+        fi
+    fi
+
+    if [ -n "${SRC_PATH}" ]; then
+        echo "[INFO] Copying user requirements from ${SRC_PATH}"
+        aws s3 cp "${SRC_PATH}" "${LOCAL_USER_REQ}" || echo "[WARN] Failed to fetch user requirements"
+    fi
+
+    if [ -f "${LOCAL_USER_REQ}" ]; then
+        echo "[INFO] Installing user packages..."
+        pip install -r "${LOCAL_USER_REQ}" || echo "[WARN] Failed to install some user packages"
+    else
+        echo "[WARN] No user requirements file found at ${USER_REQ_FILE}"
+    fi
+else
+    echo "[INFO] No user requirements provided."
+fi
+
+# ----------------------------
+# 5. Run retrain.py with provided user files
+# ----------------------------
+echo "[INFO] Running retrain.py ..."
+python /opt/meshops/retrain.py \
+    "${JOB_ID}" \
+    "${S3_REPORT}" \
+    ${USER_PATHS}
+
+EXIT_CODE=$?
+
+# ----------------------------
+# 6. Cleanup to save disk space
+# ----------------------------
+echo "[INFO] Cleaning up workspace ${WORK_DIR}..."
+
+# deactivate venv safely
+deactivate || true
+
+# remove entire job directory
+rm -rf "${WORK_DIR:?}" || true
+
+# clean pip & tmp caches
+rm -rf ~/.cache/pip/* || true
+rm -rf /root/.cache/pip/* || true
+rm -rf /tmp/* || true
+rm -rf /var/tmp/* || true
+
+echo "[INFO] === Retrain job finished with exit code ${EXIT_CODE} ==="
+exit ${EXIT_CODE}

@@ -10,14 +10,15 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/refiner")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*", allowedHeaders = "*", methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.OPTIONS})
+@CrossOrigin(origins = "*", allowedHeaders = "*",
+        methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.OPTIONS})
 public class RefinerController {
 
     private final RefinerService refinerService;
 
     /**
      * Frontend expects:
-     * POST /api/refiner/{username}/{projectName}/{versionLabel}/refine?runId=NN&autoRun=true
+     * POST /api/refiner/{username}/{projectName}/{versionLabel}/refine?promptId=299&autoRun=true
      * Body: { "userFeedback": "text..." }  // optional
      * Returns: { versionKey, canonicalKey, activated, newRunId? }
      */
@@ -26,14 +27,19 @@ public class RefinerController {
             @PathVariable String username,
             @PathVariable String projectName,
             @PathVariable String versionLabel,
-            @RequestParam("runId") long runId,
+            @RequestParam("promptId") long promptId,
             @RequestParam(name = "autoRun", defaultValue = "false") boolean autoRun,
             @RequestBody(required = false) Map<String, Object> body
     ) {
+        // Optional feedback text passed from frontend
         String feedback = null;
         if (body != null && body.get("userFeedback") != null) {
             feedback = String.valueOf(body.get("userFeedback"));
         }
-        return refinerService.refineAndActivateTests(username, projectName, versionLabel, runId, feedback, autoRun);
+
+        // Call service using promptId instead of runId
+        return refinerService.refineAndActivateByPrompt(
+                username, projectName, versionLabel, promptId, autoRun
+        );
     }
 }

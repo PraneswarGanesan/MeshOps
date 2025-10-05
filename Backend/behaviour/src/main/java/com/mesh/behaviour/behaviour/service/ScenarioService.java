@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 @Service
 @RequiredArgsConstructor
@@ -48,13 +49,17 @@ public class ScenarioService {
         }
 
         String storeMessage = "[" + role + "] " + trimmed;
+        // ✅ Auto-generate small runId if missing
+        Long effectiveRunId = (runId != null)
+                ? runId
+                : ThreadLocalRandom.current().nextLong(100, 1000); // 3-digit number
 
         ScenarioPrompt sp = ScenarioPrompt.builder()
                 .username(username.trim())
                 .projectName(projectName.trim())
                 .versionLabel(versionLabel.trim())
                 .message(storeMessage)
-                .runId(runId)
+                .runId(effectiveRunId)
                 .createdAt(new Timestamp(System.currentTimeMillis()))
                 .build();
         return repo.save(sp);

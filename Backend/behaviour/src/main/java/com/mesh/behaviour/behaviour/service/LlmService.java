@@ -288,7 +288,10 @@ RULES FOR driver.py
             predicted = idx_to_class[pred_idx]  OR  "image_open_failed:<reason>"
       compare predicted vs expected → result="PASS" or "FAIL"
       append each row → tests.csv with columns:
-            name,category,severity,expected,predicted,result  (result ALWAYS literal PASS/FAIL)
+             name,input,category,severity,expected,predicted,result
+                • 'input' column must be exactly the scenario["input"] string from tests.yaml
+                • result ALWAYS literal "PASS" or "FAIL"
+
 - Metrics:
       collect y_true/y_pred ONLY from predict-type scenarios whose expected & predicted are valid labels
       compute accuracy, precision(macro), recall(macro), f1(macro, zero_division=0)
