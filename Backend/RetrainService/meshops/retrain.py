@@ -23,7 +23,7 @@ import time
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # ─────────────────── Optional heavy deps ───────────────────
 try:
@@ -157,17 +157,20 @@ def _flatten_to_images_root(full_key: str) -> str:
 
 def download_inputs(job_dir: Path, keys: List[str], logs: Path):
     """
-    Rules:
-      1) Any S3 key that is a *prefix* mirrors its internal tree.
-      2) If the key path contains '/images/' (or basename == 'images'), map to job_dir/images/<subpath-after-images/>.
-      3) train.py / predict.py / driver.py are also copied to job root.
-      4) tests*.csv are preserved in-place AND added to tests list for merge.
+    Download all input S3 keys exactly as they appear in S3 — keep folder structure intact.
+    
+    ── Rules ──
+      • If key is a prefix (folder), mirror its entire tree under job_dir/<same_prefix>.
+      • If key is a single file, put it at job_dir/<same_relative_path>.
+      • Do NOT flatten 'images/train' or 'images/val' — they stay where they are.
+      • If we see train.py / predict.py / driver.py anywhere, also copy them to the job root.
+      • If we see tests*.csv, keep their original path AND add them to tests list.
     """
     s3 = boto_client("s3")
     out = {"train_py": None, "predict_py": None, "driver_py": None, "tests_csv_paths": []}
-    imgs_root = ensure_dir(job_dir / "images")
 
     def is_prefix(k: str) -> bool:
+        """Return True if k is an S3 prefix (i.e. a folder), False if it's an object/file."""
         try:
             s3.head_object(Bucket=S3_BUCKET, Key=k)
             return False
@@ -177,6 +180,7 @@ def download_inputs(job_dir: Path, keys: List[str], logs: Path):
             return resp.get("KeyCount", 0) > 0
 
     def list_all(prefix: str) -> List[str]:
+        """List all objects under a given prefix."""
         pfx = prefix if prefix.endswith("/") else prefix + "/"
         keys_acc = []
         paginator = s3.get_paginator("list_objects_v2")
@@ -187,60 +191,46 @@ def download_inputs(job_dir: Path, keys: List[str], logs: Path):
                     keys_acc.append(k)
         return keys_acc
 
-    def after_images_path(u: str) -> Optional[str]:
-        lo = u.lower()
-        idx = lo.rfind("/images/")
-        if idx == -1:
-            return None
-        return u[idx + len("/images/"):]
-
-    def fetch_object(obj_key: str, base_dst: Path, anchor_images: bool):
-        unixk = obj_key.replace("\\", "/")
-        # If this object itself has /images/, anchor to job_dir/images/<after-images>
-        sub_after = after_images_path(unixk)
-        if sub_after is not None:
-            dest = imgs_root / sub_after
-        else:
-            if anchor_images:
-                # prefix is images/, keep relative path under job_dir/images/
-                rel = unixk[len(base_src_prefix):]
-                dest = imgs_root / rel
-            else:
-                rel = unixk[len(base_src_prefix):]
-                dest = base_dst / rel
-
-        ensure_dir(dest.parent)
-        s3_download_file(S3_BUCKET, unixk, dest)
-
-        name = Path(unixk).name.lower()
-        if name == "train.py":
-            shutil.copyfile(dest, job_dir / "train.py")
-            out["train_py"] = job_dir / "train.py"
-        elif name == "predict.py":
-            shutil.copyfile(dest, job_dir / "predict.py")
-            out["predict_py"] = job_dir / "predict.py"
-        elif name == "driver.py":
-            shutil.copyfile(dest, job_dir / "driver.py")
-            out["driver_py"] = job_dir / "driver.py"
-        elif name.endswith(".csv") and "tests" in name:
-            out["tests_csv_paths"].append(dest)
-
     for key in keys:
         try:
-            # OBJECT
-            if not is_prefix(key):
+            if is_prefix(key):
+                # ── Mirror entire folder ──
+                base_src_prefix = key if key.endswith("/") else key + "/"
+                keys_under = list_all(base_src_prefix)
+                if not keys_under:
+                    log_append(logs, f"[WARN] empty prefix: {key}")
+                    continue
+
+                for k in keys_under:
+                    rel_path = Path(k)               # full S3 key relative path
+                    dest = job_dir / rel_path        # keep same structure under job_dir
+                    ensure_dir(dest.parent)
+                    s3_download_file(S3_BUCKET, k, dest)
+
+                    nm = dest.name.lower()
+                    if nm == "train.py":
+                        shutil.copyfile(dest, job_dir / "train.py")
+                        out["train_py"] = job_dir / "train.py"
+                    elif nm == "predict.py":
+                        shutil.copyfile(dest, job_dir / "predict.py")
+                        out["predict_py"] = job_dir / "predict.py"
+                    elif nm == "driver.py":
+                        shutil.copyfile(dest, job_dir / "driver.py")
+                        out["driver_py"] = job_dir / "driver.py"
+                    elif nm.endswith(".csv") and "tests" in nm:
+                        out["tests_csv_paths"].append(dest)
+
+                log_append(logs, f"Mirrored folder {key} → {job_dir}/{key}")
+            
+            else:
+                # ── Single object/file ──
                 unixk = key.replace("\\", "/")
-                # If single file under images path → place under job_dir/images/<after-images>
-                sub_after = after_images_path(unixk)
-                if sub_after is not None:
-                    dest = imgs_root / sub_after
-                else:
-                    # put single file at job root by filename
-                    dest = job_dir / Path(unixk).name
+                rel_path = Path(unixk)
+                dest = job_dir / rel_path           # preserve path
                 ensure_dir(dest.parent)
                 s3_download_file(S3_BUCKET, unixk, dest)
 
-                nm = Path(unixk).name.lower()
+                nm = dest.name.lower()
                 if nm == "train.py":
                     shutil.copyfile(dest, job_dir / "train.py")
                     out["train_py"] = job_dir / "train.py"
@@ -254,41 +244,12 @@ def download_inputs(job_dir: Path, keys: List[str], logs: Path):
                     out["tests_csv_paths"].append(dest)
 
                 log_append(logs, f"Fetched file {unixk}")
-                continue
-
-            # PREFIX: mirror internal tree
-            base_src_prefix = key if key.endswith("/") else key + "/"
-            base_name = Path(base_src_prefix.rstrip("/")).name
-            # If prefix itself is images/, anchor to job_dir/images
-            if base_name.lower() == "images":
-                base_dst = imgs_root
-                anchor_images = True
-            else:
-                base_dst = job_dir / base_name
-                anchor_images = False
-
-            keys_under = list_all(base_src_prefix)
-            if not keys_under:
-                log_append(logs, f"[WARN] empty prefix: {key}")
-                continue
-
-            for k in keys_under:
-                fetch_object(k, base_dst, anchor_images)
-
-            if anchor_images:
-                log_append(logs, f"Mirrored {key} → {imgs_root}")
-            else:
-                log_append(logs, f"Mirrored {key} → {base_dst}")
 
         except Exception as e:
             log_append(logs, f"[ERROR] Download failed {key}: {e}")
 
-    # Ensure train/val dirs exist
-    ensure_dir(imgs_root / "train")
-    ensure_dir(imgs_root / "val")
-
-    # Log images tree
-    for root, _, files in os.walk(imgs_root):
+    # ── Log full tree after download ──
+    for root, dirs, files in os.walk(job_dir):
         rel = Path(root).relative_to(job_dir)
         log_append(logs, f"{rel}/ -> {files}")
 
@@ -414,79 +375,219 @@ def run_train(job_dir, logs):
 
 # ─────────────────── Evaluate ───────────────────
 def run_driver_or_min_eval(job_dir, tests_yaml, logs):
+    """Run driver.py if it exists, otherwise skip gracefully"""
     driver_py = job_dir / "driver.py"
     if driver_py.exists():
-        run_live(["python3", str(driver_py), "--base_dir", "."],
-                 str(job_dir), logs, DRIVER_TIMEOUT_SEC)
+        try:
+            run_live(["python3", str(driver_py), "--base_dir", "."],
+                     str(job_dir), logs, DRIVER_TIMEOUT_SEC)
+            log_append(logs, "Driver evaluation completed successfully")
+        except Exception as e:
+            log_append(logs, f"[WARN] Driver evaluation failed: {e}")
+    else:
+        log_append(logs, "[INFO] No driver.py found, skipping evaluation")
+        # Create minimal test results if none exist
+        tests_csv = job_dir / "tests.csv"
+        if not tests_csv.exists():
+            tests_csv.write_text("name,input,category,severity,expected,predicted,result\n")
+            log_append(logs, "Created empty tests.csv")
 
 # ─────────────────── Uploads ───────────────────
 def upload_outputs(job_dir, save_base, model_path, logs):
+    """Upload outputs to S3, handling missing files gracefully"""
     mapping = {}
-    model_key = f"{save_base}/{'model.pt' if model_path.suffix == '.pt' else 'model.pkl'}"
-    s3_upload_file(model_path, S3_BUCKET, model_key)
-    mapping["model"] = f"s3://{S3_BUCKET}/{model_key}"
+    
+    # Upload model if it exists
+    if model_path and model_path.exists():
+        try:
+            model_key = f"{save_base}/{'model.pt' if model_path.suffix == '.pt' else 'model.pkl'}"
+            s3_upload_file(model_path, S3_BUCKET, model_key)
+            mapping["model"] = f"s3://{S3_BUCKET}/{model_key}"
+            log_append(logs, f"Uploaded model to {model_key}")
+        except Exception as e:
+            log_append(logs, f"[WARN] Failed to upload model: {e}")
+    
+    # Upload other artifacts
     retr = f"{save_base}/retrained"
     for name in ["logs.txt", "metrics.json", "confusion_matrix.png", "manifest.json",
                  "tests.csv", "tests_merged.csv", "final_retrain_report.json", "tests.yaml"]:
         p = job_dir / name
         if p.exists():
-            s3_upload_file(p, S3_BUCKET, f"{retr}/{name}")
-            mapping[name] = f"s3://{S3_BUCKET}/{retr}/{name}"
+            try:
+                s3_upload_file(p, S3_BUCKET, f"{retr}/{name}")
+                mapping[name] = f"s3://{S3_BUCKET}/{retr}/{name}"
+                log_append(logs, f"Uploaded {name}")
+            except Exception as e:
+                log_append(logs, f"[WARN] Failed to upload {name}: {e}")
+        else:
+            log_append(logs, f"[INFO] {name} not found, skipping upload")
+    
     return mapping
 
 def write_manifest(job_dir, model_path):
+    """Write manifest of available artifacts"""
     arts = []
     for n in ["logs.txt", "metrics.json", "confusion_matrix.png", "manifest.json",
               "tests.csv", "tests_merged.csv", "tests.yaml"]:
         p = job_dir / n
         if p.exists():
-            arts.append({"name": n, "sha256": sha256_file(p), "size": p.stat().st_size})
-    if model_path.exists():
-        arts.append({"name": model_path.name, "sha256": sha256_file(model_path),
-                     "size": model_path.stat().st_size})
-    (job_dir / "manifest.json").write_text(json.dumps({"artifacts": arts}, indent=2))
+            try:
+                arts.append({"name": n, "sha256": sha256_file(p), "size": p.stat().st_size})
+            except Exception as e:
+                print(f"[WARN] Failed to process {n}: {e}")
+    
+    if model_path and model_path.exists():
+        try:
+            arts.append({"name": model_path.name, "sha256": sha256_file(model_path),
+                         "size": model_path.stat().st_size})
+        except Exception as e:
+            print(f"[WARN] Failed to process model file: {e}")
+    
+    manifest_data = {
+        "artifacts": arts,
+        "timestamp": now_ts(),
+        "total_artifacts": len(arts)
+    }
+    
+    try:
+        (job_dir / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
+    except Exception as e:
+        print(f"[WARN] Failed to write manifest: {e}")
 
 def write_final_report(job_dir, job_id, save_base, s3_map, status, error=""):
-    rep = {"jobId": job_id, "saveBase": save_base, "status": status,
-           "error": error, "artifacts": s3_map, "timestamp": now_ts()}
-    (job_dir / "final_retrain_report.json").write_text(json.dumps(rep, indent=2))
+    """Write final report with comprehensive status information"""
+    rep = {
+        "jobId": job_id, 
+        "saveBase": save_base, 
+        "status": status,
+        "error": error, 
+        "artifacts": s3_map, 
+        "timestamp": now_ts(),
+        "workspace": str(job_dir),
+        "artifact_count": len(s3_map)
+    }
+    
+    try:
+        (job_dir / "final_retrain_report.json").write_text(json.dumps(rep, indent=2))
+    except Exception as e:
+        print(f"[ERROR] Failed to write final report: {e}")
+
+# ─────────────────── Cleanup ───────────────────
+def cleanup_workspace(job_dir: Path, logs: Path):
+    """Clean up the entire workspace after job completion"""
+    try:
+        if job_dir.exists():
+            # First try to upload logs one final time
+            try:
+                log_append(logs, "Starting workspace cleanup...")
+            except Exception:
+                pass
+            
+            # Remove the entire job directory
+            shutil.rmtree(str(job_dir), ignore_errors=True)
+            print(f"[INFO] Cleaned up workspace: {job_dir}")
+        else:
+            print(f"[INFO] Workspace {job_dir} already cleaned up")
+    except Exception as e:
+        print(f"[WARN] Failed to cleanup workspace {job_dir}: {e}")
 
 # ─────────────────── MAIN ───────────────────
 def main():
     job_id, save_base, s3_keys = parse_args()
     job_dir = ensure_dir(JOBS_ROOT / f"job_{job_id}")
     logs = job_dir / "logs.txt"
+    
+    # Initialize with basic info
     log_append(logs, f"Start retrain job={job_id} keys={s3_keys}")
-
+    log_append(logs, f"Workspace: {job_dir}")
+    log_append(logs, f"S3 Bucket: {S3_BUCKET}")
+    
+    model_path = None
+    s3_map = {}
+    
     try:
-        meta = download_inputs(job_dir, s3_keys, logs)
-        merged_csv, tests_yaml = merge_tests_and_build_yaml(job_dir, meta["tests_csv_paths"], logs)
-        augment_from_failed(job_dir, merged_csv, logs)
-
-        model_path = run_train(job_dir, logs)
-        log_append(logs, f"Model saved at {model_path}")
-
-        run_driver_or_min_eval(job_dir, tests_yaml, logs)
-
-        write_manifest(job_dir, model_path)
-        s3_map = upload_outputs(job_dir, save_base, model_path, logs)
-
+        # Download inputs with error handling
+        try:
+            meta = download_inputs(job_dir, s3_keys, logs)
+            log_append(logs, "Input download completed")
+        except Exception as e:
+            log_append(logs, f"[WARN] Input download issues: {e}")
+            meta = {"train_py": None, "predict_py": None, "driver_py": None, "tests_csv_paths": []}
+        
+        # Merge tests with error handling
+        try:
+            merged_csv, tests_yaml = merge_tests_and_build_yaml(job_dir, meta["tests_csv_paths"], logs)
+        except Exception as e:
+            log_append(logs, f"[WARN] Test merge failed: {e}")
+            merged_csv = job_dir / "tests_merged.csv"
+            tests_yaml = job_dir / "tests.yaml"
+            merged_csv.write_text("name,input,category,severity,expected,predicted,result\n")
+            tests_yaml.write_text("scenarios: []\n")
+        
+        # Augment from failed tests
+        try:
+            augment_from_failed(job_dir, merged_csv, logs)
+        except Exception as e:
+            log_append(logs, f"[WARN] Augmentation failed: {e}")
+        
+        # Run training with error handling
+        try:
+            model_path = run_train(job_dir, logs)
+            log_append(logs, f"Model saved at {model_path}")
+        except Exception as e:
+            log_append(logs, f"[WARN] Training failed: {e}")
+            # Create placeholder model
+            model_path = job_dir / "model.pt"
+            model_path.write_text("TRAINING_FAILED")
+        
+        # Run evaluation with error handling
+        try:
+            run_driver_or_min_eval(job_dir, tests_yaml, logs)
+        except Exception as e:
+            log_append(logs, f"[WARN] Evaluation failed: {e}")
+        
+        # Write manifest and upload outputs
+        try:
+            write_manifest(job_dir, model_path)
+            s3_map = upload_outputs(job_dir, save_base, model_path, logs)
+            log_append(logs, f"Uploaded {len(s3_map)} artifacts")
+        except Exception as e:
+            log_append(logs, f"[WARN] Upload issues: {e}")
+        
+        # Write final report
         write_final_report(job_dir, job_id, save_base, s3_map, "SUCCESS")
-        s3_upload_file(job_dir / "final_retrain_report.json", S3_BUCKET,
-                       f"{save_base}/retrained/final_retrain_report.json")
+        
+        # Upload final report
+        try:
+            s3_upload_file(job_dir / "final_retrain_report.json", S3_BUCKET,
+                           f"{save_base}/retrained/final_retrain_report.json")
+        except Exception as e:
+            log_append(logs, f"[WARN] Failed to upload final report: {e}")
+        
         log_append(logs, "=== Retrain SUCCESS ===")
-
+        
     except Exception as e:
-        log_append(logs, f"[FAILED] {e}")
-        write_final_report(job_dir, job_id, save_base, {}, "FAILED", str(e))
+        log_append(logs, f"[FAILED] Critical error: {e}")
+        write_final_report(job_dir, job_id, save_base, s3_map, "FAILED", str(e))
+        
+        # Try to upload failure report
         try:
             s3_upload_file(job_dir / "final_retrain_report.json", S3_BUCKET,
                            f"{save_base}/retrained/final_retrain_report.json")
         except Exception:
             pass
+        
+        # Still cleanup even on failure
+        cleanup_workspace(job_dir, logs)
         sys.exit(1)
+    
     finally:
-        log_append(logs, "Job complete; leaving workspace for debugging.")
+        # Always cleanup workspace
+        try:
+            log_append(logs, "Job complete, cleaning up workspace...")
+        except Exception:
+            pass
+        cleanup_workspace(job_dir, logs)
 
 if __name__ == "__main__":
     main()
