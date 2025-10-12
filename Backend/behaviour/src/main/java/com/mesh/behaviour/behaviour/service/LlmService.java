@@ -165,9 +165,16 @@ USER BRIEF:
         if (!StringUtils.hasText(versionPrefix)) throw new IllegalArgumentException("versionPrefix required");
 
         String root = normalizeBaseKey(baseKey); // root: {username}/{project}
-        String vp = versionPrefix.endsWith("/") ? versionPrefix : versionPrefix + "/";
-        String versionBaseKey = S3KeyUtil.join(root, "artifacts/versions/", vp);
+        // versionPrefix may be just 'v2' or a path containing 'artifacts/versions/v2' – normalize to 'v2'
+        String vLabel = (versionPrefix == null ? "" : versionPrefix.trim());
+        if (vLabel.startsWith("s3://")) vLabel = S3KeyUtil.keyOf(vLabel);
+        // Extract last 'vN' occurrence
+        Matcher vm = Pattern.compile("v\\d+").matcher(vLabel);
+        String onlyV = null; while (vm.find()) { onlyV = vm.group(); }
+        if (!StringUtils.hasText(onlyV)) throw new IllegalArgumentException("versionLabel required");
+        String versionBaseKey = S3KeyUtil.join(root, "artifacts/versions", onlyV, "");
 
+        log.info("[generate] root='{}', versionBase='{}'", root, versionBaseKey);
         String augmentedContext = buildS3AugmentedContext(root, versionBaseKey);
         String prompt = buildDriverAndTestsPrompt(augmentedContext, brief);
 
@@ -248,14 +255,95 @@ RULES FOR driver.py
       if "<base_dir>/pre-processed" exists → data_root = that
       else → data_root = <base_dir>
 - Model handling (NO external predict.py):
-      model_path_pt  = os.path.join(data_root, "model.pt")
-      model_path_pkl = os.path.join(data_root, "model.pkl")
-      • if model.pt exists → load torchvision ResNet18 (fc=2)
-      • else if model.pkl → load via joblib
-      • else → AUTO-TRAIN by:
-            python3 <base_dir>/pre-processed/train.py   (cwd = data_root, timeout=900)
-        after subprocess finishes → MUST check model.pt or model.pkl exists,
-        if missing → print clear error + sys.exit(1)
+      # Check for model in base_dir first (artifacts), then data_root
+      model_path_pt_base  = os.path.join(base_dir, "model.pt")
+      model_path_pkl_base = os.path.join(base_dir, "model.pkl")
+      model_path_pt_data  = os.path.join(data_root, "model.pt")
+      model_path_pkl_data = os.path.join(data_root, "model.pkl")
+      
+      # Try to load model from base_dir first, if corrupted/missing → train new one
+      model_loaded = False
+      
+      # Check base_dir for model.pt
+      if os.path.exists(model_path_pt_base):
+          try:
+              file_size = os.path.getsize(model_path_pt_base)
+              if file_size < 1024:
+                  print(f"Warning: {model_path_pt_base} is only {file_size} bytes - corrupted, will train new model")
+              else:
+                  print(f"Loading model from: {model_path_pt_base}")
+                  model = models.resnet18(pretrained=False)
+                  model.fc = torch.nn.Linear(model.fc.in_features, 2)
+                  model.load_state_dict(torch.load(model_path_pt_base, map_location=device, weights_only=False))
+                  model = model.to(device)
+                  model.eval()
+                  model_path = model_path_pt_base
+                  model_loaded = True
+                  print(f"Successfully loaded model from: {model_path_pt_base}")
+          except Exception as e:
+              print(f"Warning: Failed to load model from {model_path_pt_base}: {e}")
+              print(f"Will train a new model instead")
+      
+      # If model not loaded, train a new one
+      if not model_loaded:
+          print("No valid model found. Training a new model using train.py...")
+          train_script = os.path.join(data_root, "train.py")
+          if not os.path.exists(train_script):
+              print(f"Error: train.py not found at {train_script}. Cannot train model.")
+              sys.exit(1)
+          
+          print(f"Running training script: python3 {train_script}")
+          try:
+              train_process = subprocess.run(
+                  ["python3", train_script],
+                  cwd=data_root,
+                  capture_output=True,
+                  text=True,
+                  check=True,
+                  timeout=900
+              )
+              print("Training stdout:")
+              print(train_process.stdout)
+              if train_process.stderr:
+                  print("Training stderr:")
+                  print(train_process.stderr)
+          except subprocess.CalledProcessError as e:
+              print(f"Training failed: {e}")
+              print(f"Stdout: {e.stdout}")
+              print(f"Stderr: {e.stderr}")
+              sys.exit(1)
+          except subprocess.TimeoutExpired:
+              print("Training timed out after 900 seconds")
+              sys.exit(1)
+          
+          # After training, load the newly created model
+          if os.path.exists(os.path.join(data_root, "model.pt")):
+              model_path = os.path.join(data_root, "model.pt")
+              print(f"Model trained and saved to: {model_path}")
+              model = models.resnet18(pretrained=False)
+              model.fc = torch.nn.Linear(model.fc.in_features, 2)
+              model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+              model = model.to(device)
+              model.eval()
+              model_loaded = True
+          else:
+              print("Error: Training completed but no model.pt found")
+              sys.exit(1)
+      
+      CRITICAL: ALL torch.load() calls MUST include weights_only=False parameter:
+          torch.load(model_path, map_location=device, weights_only=False)
+      This is required for PyTorch 2.6+ compatibility with custom model architectures
+      
+      CRITICAL: ALWAYS wrap model loading in try-except to catch corrupted files:
+          try:
+              # Check file size first
+              if os.path.getsize(model_path) < 1024:
+                  raise ValueError("Model file too small, likely corrupted")
+              model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+          except Exception as e:
+              print(f"Failed to load model: {e}")
+              # Try next candidate or train
+      
       • ALWAYS define transform + idx_to_class = {0:"cat",1:"dog"}
       • device = "cuda" if available else "cpu"
 - Logging:
@@ -363,6 +451,7 @@ USER BRIEF:
 
     private String buildS3AugmentedContext(String root, String versionBase) {
         StringBuilder sb = new StringBuilder();
+        log.info("[context] building with root='{}', versionBase='{}'", root, versionBase);
 
         // existing small snippets for train.py, predict.py, dataset.csv
         String pre = S3KeyUtil.join(root, "pre-processed/");
@@ -370,6 +459,7 @@ USER BRIEF:
         for (String rel : new String[]{"train.py", "predict.py", "dataset.csv"}) {
             String key = S3KeyUtil.join(pre, rel);
             boolean exists = s3.exists(key);
+            log.info("[context.exists] key='{}' -> {}", key, exists);
             sb.append("[file] pre-processed/").append(rel).append(" ")
                     .append(exists ? "PRESENT" : "MISSING").append("\n");
             if (exists) {
@@ -398,6 +488,8 @@ USER BRIEF:
         String modelPtKey = S3KeyUtil.join(versionBase, "model.pt");
         boolean hasPkl = s3.exists(modelPklKey);
         boolean hasPt = s3.exists(modelPtKey);
+        log.info("[context.exists] modelPkl='{}' -> {}", modelPklKey, hasPkl);
+        log.info("[context.exists] modelPt='{}' -> {}", modelPtKey, hasPt);
 
         sb.append("\n=== MODEL FILES IN VERSION FOLDER ===\n");
         sb.append("[model] model.pkl ").append(hasPkl ? "PRESENT" : "MISSING").append("\n");
@@ -412,10 +504,12 @@ USER BRIEF:
         for (String txtDir : new String[]{"texts/train/", "texts/val/"}) {
             String prefix = S3KeyUtil.join(pre, txtDir);
             boolean present = s3.existsPrefix(prefix);
+            log.info("[context.prefix] prefix='{}' -> {}", prefix, present);
             sb.append("[dir] pre-processed/").append(txtDir).append(" : ").append(present ? "PRESENT" : "MISSING").append("\n");
             if (present) {
                 int limit = 50;
                 List<String> keys = new ArrayList<>(s3.listKeys(prefix));
+                log.info("[context.list] prefix='{}' count={} (showing up to {})", prefix, keys.size(), limit);
                 int shown = 0;
                 for (String k : keys) {
                     if (!k.endsWith("/") && shown < limit) {
@@ -429,9 +523,11 @@ USER BRIEF:
 
         // versionBase model presence summary too
         if (StringUtils.hasText(versionBase)) {
-            String versionLabel = versionBase.contains("/v") ? versionBase.substring(versionBase.indexOf("/v")) : versionBase;
+            // Extract clean vN label
+            Matcher m = Pattern.compile("v\\d+").matcher(versionBase);
+            String v = null; while (m.find()) { v = m.group(); }
             String modelKey = S3KeyUtil.join(versionBase, "model.pkl");
-            sb.append("\n[file] artifacts/versions/").append(versionLabel).append("/model.pkl ")
+            sb.append("\n[file] artifacts/versions/").append(v == null ? "" : v).append("/model.pkl ")
                     .append(s3.exists(modelKey) ? "PRESENT" : "MISSING").append("\n");
         }
 
@@ -446,11 +542,13 @@ USER BRIEF:
         for (String imgDir : new String[]{"images/train/", "images/val/"}) {
             String prefix = S3KeyUtil.join(pre, imgDir);
             boolean present = s3.existsPrefix(prefix);
+            log.info("[context.prefix] prefix='{}' -> {}", prefix, present);
             sb.append("[dir] pre-processed/").append(imgDir).append(" : ").append(present ? "PRESENT" : "MISSING").append("\n");
             if (present) {
                 // collect up to N files and class names
                 int limit = 50;
                 List<String> keys = new ArrayList<>(s3.listKeys(prefix));
+                log.info("[context.list] prefix='{}' count={} (showing up to {})", prefix, keys.size(), limit);
                 int shown = 0;
                 // infer classes by first path segment
                 Set<String> classes = new TreeSet<>();
@@ -490,6 +588,7 @@ USER BRIEF:
         // dataset.csv presence + column names
         String csvKey = S3KeyUtil.join(pre, "dataset.csv");
         boolean csvExists = s3.exists(csvKey);
+        log.info("[context.exists] key='{}' -> {}", csvKey, csvExists);
         sb.append("[file] pre-processed/dataset.csv : ").append(csvExists ? "PRESENT" : "MISSING").append("\n");
         if (csvExists) {
             try {

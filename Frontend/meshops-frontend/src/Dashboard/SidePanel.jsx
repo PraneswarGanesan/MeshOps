@@ -11,6 +11,8 @@ const SidePanel = () => {
     { path: "/dashboard/storage", label: "STORAGE" },
      { path: "/dashboard/pre-process", label: "PRE PROCESS" },
      { path: "/dashboard/behaviour-test", label: "BEHAVIOUR TEST" },
+    { path: "/dashboard/unit-test", label: "UNIT TEST" },
+    { path: "/dashboard/retrain", label: "RETRAIN MODEL" },
     // { path: "/dashboard/get-analytics", label: "PRE PROCESS" },
     // { path: "/dashboard/select-device", label: "BEHAVIOUR TEST" },
   ];

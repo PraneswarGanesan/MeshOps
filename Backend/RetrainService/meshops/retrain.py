@@ -286,7 +286,7 @@ def merge_tests_and_build_yaml(job_dir, tests_paths, logs):
         for _, r in rows.iterrows():
             inp = r.get("input"); exp = r.get("expected")
             if not (isinstance(inp, str) and isinstance(exp, str)): continue
-            scenarios.append({
+            scenarios.append({  
                 "name": str(r.get("name", Path(inp).name)),
                 "function": "predict",
                 "input": inp,
@@ -397,13 +397,19 @@ def upload_outputs(job_dir, save_base, model_path, logs):
     """Upload outputs to S3, handling missing files gracefully"""
     mapping = {}
     
-    # Upload model if it exists
+    # Upload model if it exists and is valid (not corrupted/placeholder)
     if model_path and model_path.exists():
         try:
-            model_key = f"{save_base}/{'model.pt' if model_path.suffix == '.pt' else 'model.pkl'}"
-            s3_upload_file(model_path, S3_BUCKET, model_key)
-            mapping["model"] = f"s3://{S3_BUCKET}/{model_key}"
-            log_append(logs, f"Uploaded model to {model_key}")
+            # Check file size - corrupted/placeholder models are typically < 1KB
+            file_size = model_path.stat().st_size
+            if file_size < 1024:
+                log_append(logs, f"[WARN] Model file {model_path.name} is only {file_size} bytes - "
+                                 f"likely a placeholder/corrupted. Skipping upload.")
+            else:
+                model_key = f"{save_base}/{'model.pt' if model_path.suffix == '.pt' else 'model.pkl'}"
+                s3_upload_file(model_path, S3_BUCKET, model_key)
+                mapping["model"] = f"s3://{S3_BUCKET}/{model_key}"
+                log_append(logs, f"Uploaded model ({file_size} bytes) to {model_key}")
         except Exception as e:
             log_append(logs, f"[WARN] Failed to upload model: {e}")
     

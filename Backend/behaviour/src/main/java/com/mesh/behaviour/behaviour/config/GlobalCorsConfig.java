@@ -13,7 +13,11 @@ public class GlobalCorsConfig {
     @Bean
     public CorsWebFilter corsWebFilter() {
         CorsConfiguration config = new CorsConfiguration();
-        config.addAllowedOrigin("http://localhost:5173"); // your Vite dev origin
+        config.addAllowedOrigin("http://localhost:5173"); // Vite dev origin
+        config.addAllowedOrigin("http://localhost:3000"); // React dev origin
+        config.addAllowedOrigin("http://127.0.0.1:5173"); // Alternative localhost
+        config.addAllowedOrigin("http://127.0.0.1:3000"); // Alternative localhost
+        config.addAllowedOriginPattern("*"); // Allow all origins for development
         config.addAllowedHeader(CorsConfiguration.ALL);
         config.addAllowedMethod(CorsConfiguration.ALL);
         config.setAllowCredentials(false); // set true only if you use cookies/credentials

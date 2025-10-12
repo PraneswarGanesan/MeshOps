@@ -1,5 +1,6 @@
 // src/api/storage.js
 const BASE = "http://localhost:8081";
+const PROJECTS_BASE = "http://localhost:8082"; // for MySQL project ensure
 
 async function ok(res, url) {
   if (!res.ok) {
@@ -17,6 +18,14 @@ export const StorageAPI = {
     const url = `${BASE}/api/user-storage/${encodeURIComponent(username)}/projects`;
     const res = await ok(await fetch(url), url);
     return res.json(); // ["projectA","projectB"]
+  },
+
+  async createProject(username, projectName) {
+    // Creates the S3 folder for a project
+    const url = `${BASE}/api/user-storage/${encodeURIComponent(username)}/projects/${encodeURIComponent(projectName)}`;
+    const res = await ok(await fetch(url, { method: "POST" }), url);
+    // backend may return plain text like "Project created successfully"
+    try { return await res.text(); } catch { return "ok"; }
   },
 
   async listFiles(username, projectName, folder = "") {
@@ -52,6 +61,23 @@ export const StorageAPI = {
     form.append("file", file);
 
     const res = await ok(await fetch(url, { method: "POST", body: form }), url);
+    try { return await res.json(); } catch { return true; }
+  },
+
+  async ensureProject(username, projectName, bucket = "my-users-meshops-bucket") {
+    // Ensures the project is recorded in MySQL
+    const s3Prefix = `s3://${bucket}/${username}/${projectName}/`;
+    const url = `${PROJECTS_BASE}/api/projects/ensure`;
+    const payload = { username, projectName, s3Prefix };
+    console.log("[ensureProject] payload:", payload);
+    const res = await ok(
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+      url
+    );
     try { return await res.json(); } catch { return true; }
   },
 };

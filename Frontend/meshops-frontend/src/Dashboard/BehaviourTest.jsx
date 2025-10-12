@@ -1,7 +1,7 @@
 // src/pages/BehaviourTest.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import Editor from "@monaco-editor/react";
-import { ensureProject, startRun, getRunStatus, listArtifacts } from "../api/behaviour";
+import { ensureProject, startRun, getRunStatus, listArtifacts, approvePlan, generateDriverAndTests as genDriverTests, refineByPromptId, generateCatDogClassifier } from "../api/behaviour";
 import { StorageAPI } from "../api/storage";
 import {
   PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -9,9 +9,7 @@ import {
 
 /* ---------- endpoints (must match backend) ---------- */
 const BASE_RUNS = "http://localhost:8082/api/runs";
-const BASE_REFINER = "http://localhost:8082/api/refiner";
 const BASE_SCENARIOS = "http://localhost:8082/api/scenarios";
-const BASE_PLANS = "http://localhost:8082/api/plans";
 const BASE_STORAGE = "http://localhost:8081";
 const BUCKET_PREFIX = "s3://my-users-meshops-bucket";
 
@@ -102,26 +100,25 @@ const s3DownloadUrl = (username, projectName, folder, fileName) =>
   )}` + `/download/${encodeURIComponent(fileName)}?folder=${encodeURIComponent(folder || "")}`;
 
 /* ---------- API helpers ---------- */
-async function approvePlanFull({ username, projectName }) {
-  const driverKey = `${username}/${projectName}/pre-processed/driver.py`;
-  const testsKey = `${username}/${projectName}/pre-processed/tests.yaml`;
-  const s3Prefix = `${BUCKET_PREFIX}/${username}/${projectName}/pre-processed`;
-  const url = `${BASE_PLANS}/approve`;
-  const payload = { username, projectName, driverKey, testsKey, s3Prefix, approved: true };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error((await res.text()) || "Approve failed");
-  return res.json();
+async function approvePlanFull({ username, projectName, versionLabel }) {
+  // Approve using artifacts of the selected version
+  // Send RELATIVE keys; backend will resolve with project prefix
+  const driverKey = `artifacts/versions/${versionLabel}/driver.py`;
+  const testsKey = `artifacts/versions/${versionLabel}/tests.yaml`;
+  console.log("[approvePlanFull]", { username, projectName, versionLabel, driverKey, testsKey });
+  return await approvePlan({ username, projectName, versionLabel, driverKey, testsKey, approved: true });
 }
 async function saveScenarioPrompt(u, p, message, runId) {
   const url = `${BASE_SCENARIOS}/${encodeURIComponent(u)}/${encodeURIComponent(p)}/prompts`;
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { 
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    },
     body: JSON.stringify({ message, runId: runId ?? null }),
+    credentials: 'include',
+    mode: 'cors'
   });
   if (!res.ok) throw new Error((await res.text()) || "Failed to save prompt");
   return res.json();
@@ -131,37 +128,25 @@ async function listScenarioPrompts(username, projectName, limit = 12) {
     projectName
   )}/prompts?limit=${limit}`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: { 
+        "Access-Control-Allow-Origin": "*"
+      },
+      credentials: 'include',
+      mode: 'cors'
+    });
     if (!res.ok) return [];
     return res.json();
   } catch {
     return [];
   }
 }
-async function refineTests(username, projectName, runId, feedback, autoRun) {
-  const url = `${BASE_REFINER}/${encodeURIComponent(username)}/${encodeURIComponent(
-    projectName
-  )}/refine?runId=${encodeURIComponent(runId)}&autoRun=${autoRun ? "true" : "false"}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userFeedback: feedback || "" }),
-  });
-  if (!res.ok) throw new Error((await res.text()) || "Refine failed");
-  return res.json();
+async function refineTests(username, projectName, versionLabel, promptId, autoRun) {
+  // New refiner endpoint by promptId
+  return await refineByPromptId(username, projectName, versionLabel, promptId, autoRun);
 }
-async function generateDriverAndTests(username, projectName, brief = "", files = []) {
-  const url = `${BASE_PLANS}/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/generate`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      brief: brief || "Create a deterministic driver.py and tests.yaml (with scenarios) for behaviour testing.",
-      files: files.length ? files : ["train.py", "predict.py", "dataset.csv"],
-    }),
-  });
-  if (!res.ok) throw new Error((await res.text()) || "Generate failed");
-  return res.json();
+async function generateDriverAndTests(username, projectName, versionLabel, brief = "") {
+  return await genDriverTests(username, projectName, versionLabel, brief || "Generate driver and tests for this version.");
 }
 async function generateTestsYamlOnly(username, projectName, brief = "") {
   const url = `${BASE_PLANS}/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/tests/new`;
@@ -202,6 +187,15 @@ export default function BehaviourTest() {
   const [autoRunAfterRefine, setAutoRunAfterRefine] = useState(true);
   const [busy, setBusy] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
+  const [versions, setVersions] = useState([]);
+  const [selectedVersion, setSelectedVersion] = useState("v1");
+  const [artifactFiles, setArtifactFiles] = useState([]);
+  const [artifactPath, setArtifactPath] = useState(""); // path within artifacts/versions/{selectedVersion}
+  const [artifactList, setArtifactList] = useState([]);   // [{name,isDir}]
+  const [viewingArtifact, setViewingArtifact] = useState(null);
+  const [artifactContent, setArtifactContent] = useState("");
+  const [briefInput, setBriefInput] = useState("");
+  const [generatingFiles, setGeneratingFiles] = useState(false);
 
   /* Project bootstrap */
   useEffect(() => {
@@ -243,6 +237,107 @@ export default function BehaviourTest() {
   }, [username, projectName]);
   const refreshPrompts = async () => setPrompts(await listScenarioPrompts(username, projectName, 12));
 
+  /* load versions */
+  const loadVersions = async () => {
+    if (!projectName) return;
+    console.log('Loading versions for project:', projectName);
+    try {
+      const items = await StorageAPI.listFiles(username, projectName, "artifacts/versions");
+      console.log('Artifacts folder contents:', items);
+      const versionDirs = (items || [])
+        .map(n => String(n || ''))
+        .filter(n => /^v\d+\/?$/.test(n))
+        .map(n => n.replace(/\/$/, ''))
+        .sort((a, b) => {
+          const aNum = parseInt(a.substring(1)) || 0;
+          const bNum = parseInt(b.substring(1)) || 0;
+          return bNum - aNum; // newest first
+        });
+      console.log('Found version directories:', versionDirs);
+      setVersions(versionDirs.length ? versionDirs : ["v1"]);
+      if (!selectedVersion || !versionDirs.includes(selectedVersion)) {
+        setSelectedVersion(versionDirs[0] || "v1");
+      }
+    } catch (error) {
+      console.error('Error loading versions:', error);
+      if (!versions.length) {
+        setVersions(["v1"]);
+        setSelectedVersion("v1");
+      }
+    }
+  };
+
+  /* load artifacts from selected version and current path */
+  const loadArtifactFiles = async () => {
+    if (!projectName || !selectedVersion) return;
+    console.log('Loading artifact files for version:', selectedVersion, 'path:', artifactPath || '/');
+    try {
+      const folder = artifactPath
+        ? `artifacts/versions/${selectedVersion}/${artifactPath}`
+        : `artifacts/versions/${selectedVersion}`;
+      const items = await StorageAPI.listFiles(username, projectName, folder);
+      console.log('Artifact items in folder:', folder, items);
+      const list = (items || []).map((n) => ({ name: n, isDir: String(n).endsWith('/') }));
+      // Sort: folders first, then files; both alphabetically
+      list.sort((a,b)=> (a.isDir===b.isDir) ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1);
+      setArtifactList(list);
+      // keep a convenience list of key text files in this folder
+      const files = (items || [])
+        .filter(n => n && !n.endsWith('/') && TEXT_EXT.has(ext(n)))
+        .sort((a, b) => {
+          if (a === 'driver.py') return -1;
+          if (b === 'driver.py') return 1;
+          if (a === 'tests.yaml') return -1;
+          if (b === 'tests.yaml') return 1;
+          return a.localeCompare(b);
+        });
+      setArtifactFiles(files);
+    } catch (error) {
+      console.error('Error loading artifact files:', error);
+      setArtifactList([]);
+      setArtifactFiles([]);
+    }
+  };
+
+  const enterArtifactDir = (dirName) => {
+    const clean = String(dirName).replace(/\/$/, '');
+    setArtifactPath((p) => (p ? `${p}/${clean}` : clean));
+  };
+  const upArtifact = () => {
+    setArtifactPath((p) => {
+      const parts = (p || '').split('/').filter(Boolean);
+      parts.pop();
+      return parts.join('/');
+    });
+  };
+  
+  // Function to handle generating driver.py and tests.yaml
+  const handleGenerateDriverAndTests = async () => {
+    if (!briefInput.trim()) {
+      alert("Please enter a brief description for generation");
+      return;
+    }
+    
+    setGeneratingFiles(true);
+    try {
+      // Use the direct endpoint for cat_dog_im v2
+      const result = await generateCatDogClassifier(briefInput);
+      console.log("Generation result:", result);
+      
+      // Refresh artifact files to show newly generated files
+      await loadArtifactFiles();
+      
+      // Clear the brief input
+      setBriefInput("");
+      alert("Driver and tests generated successfully!");
+    } catch (error) {
+      console.error("Error generating driver and tests:", error);
+      alert("Failed to generate driver and tests: " + (error.message || "Unknown error"));
+    } finally {
+      setGeneratingFiles(false);
+    }
+  };
+
   /* load pre-processed files */
   const loadEditorsFromPreProcessed = async () => {
     try {
@@ -270,14 +365,40 @@ export default function BehaviourTest() {
     }
   };
   useEffect(() => {
-    if (projectName) loadEditorsFromPreProcessed();
+    if (projectName) {
+      loadEditorsFromPreProcessed();
+      loadVersions();
+    }
+  }, [projectName]);
+
+  useEffect(() => {
+    if (projectName && selectedVersion) {
+      loadArtifactFiles();
+    }
+  }, [projectName, selectedVersion]);
+
+  // When artifactPath changes, reload current folder
+  useEffect(() => {
+    if (projectName && selectedVersion != null) {
+      loadArtifactFiles();
+    }
+  }, [artifactPath]);
+
+  // Reset inner path when switching versions
+  useEffect(() => {
+    setArtifactPath("");
+  }, [selectedVersion]);
+
+  // Also reset when switching projects
+  useEffect(() => {
+    setArtifactPath("");
   }, [projectName]);
 
   /* refresh runs & metrics trend */
   const refreshRuns = async () => {
-    if (!projectName) return;
+    if (!projectName || !selectedVersion) return;
     try {
-      const items = await StorageAPI.listFiles(username, projectName, "artifacts-behaviour");
+      const items = await StorageAPI.listFiles(username, projectName, `artifacts/versions/${selectedVersion}/behaviour`);
       const parsed = (items || [])
         .map((n) => String(n).trim())
         .map((n) => {
@@ -297,7 +418,7 @@ export default function BehaviourTest() {
             username,
             projectName,
             "metrics.json",
-            `artifacts-behaviour/run_${r.runId}`
+            `artifacts/versions/${selectedVersion}/behaviour/run_${r.runId}`
           );
           const mj = JSON.parse(txt || "{}");
           const acc =
@@ -323,17 +444,22 @@ export default function BehaviourTest() {
   };
   useEffect(() => {
     refreshRuns();
-  }, [projectName]);
+  }, [projectName, selectedVersion]);
 
   /* console streaming */
   useEffect(() => {
     if (!runId) return;
+    const url = `${BASE_RUNS}/${encodeURIComponent(runId)}/console`;
+    console.log("[console] start polling", url);
     const t = setInterval(async () => {
       try {
-        const res = await fetch(`${BASE_RUNS}/${encodeURIComponent(runId)}/console`);
+        console.log("[console] GET", url);
+        const res = await fetch(url);
         if (res.ok) setConsoleLines((await res.text()).split("\n"));
-      } catch {}
-    }, 2000);
+      } catch (err) {
+        console.warn("[console] error", err);
+      }
+    }, 3000);
     return () => clearInterval(t);
   }, [runId]);
 
@@ -396,8 +522,8 @@ export default function BehaviourTest() {
     if (!projectName) return;
     setBusy(true);
     try {
-      await Promise.all(files.map((f) => uploadS3Text(`pre-processed/${f.name}`, f.content)));
-      await approvePlanFull({ username, projectName });
+      // Assuming artifacts already placed per version; approve that version
+      await approvePlanFull({ username, projectName, versionLabel: selectedVersion });
       setConsoleLines((ls) => [...ls, "Approved current plan."]);
     } catch (e) {
       alert("Save & Approve failed: " + (e?.message || e));
@@ -411,12 +537,15 @@ export default function BehaviourTest() {
     if (!projectName) return;
     setBusy(true);
     try {
-      await Promise.all(files.map((f) => uploadS3Text(`pre-processed/${f.name}`, f.content)));
-      await approvePlanFull({ username, projectName });
-      const r = await startRun({ username, projectName, task: "classification" });
+      console.log("[approveAndRun] selectedVersion=", selectedVersion);
+      await approvePlanFull({ username, projectName, versionLabel: selectedVersion });
+      const runPayload = { username, projectName, versionName: selectedVersion, task: "classification" };
+      console.log("[approveAndRun] startRun payload", runPayload);
+      const r = await startRun(runPayload);
       const newRunId = r?.data?.runId ?? r?.runId ?? null;
       setRunId(newRunId);
       setConsoleLines(["Starting run…"]);
+      console.log("[approveAndRun] runId=", newRunId);
     } catch (e) {
       alert("Approve & Run failed: " + (e?.message || e));
     } finally {
@@ -431,6 +560,8 @@ export default function BehaviourTest() {
       try {
         const res = await getRunStatus(runId);
         const isDone = res?.data?.isDone ?? res?.isDone ?? false;
+        const status = res?.data?.status ?? res?.status ?? "unknown";
+        
         if (isDone) {
           clearInterval(timer);
           const artsRes = await listArtifacts(runId);
@@ -438,6 +569,24 @@ export default function BehaviourTest() {
           const metricsArt = arr.find((a) => (a.name || "").toLowerCase().includes("metrics"));
           const confArt = arr.find((a) => (a.name || "").toLowerCase().includes("confusion"));
           const csvArt = arr.find((a) => (a.name || "").endsWith(".csv"));
+          const logsArt = arr.find((a) => (a.name || "").toLowerCase().includes("logs"));
+
+          // Check if run failed
+          if (status === "Failed" || status === "failed") {
+            setConsoleLines((ls) => [...ls, "❌ Run failed - check logs for details"]);
+            
+            // Try to fetch logs to show error details
+            if (logsArt?.url) {
+              try {
+                const logsText = await fetch(logsArt.url).then((r) => (r.ok ? r.text() : ""));
+                if (logsText.includes("corrupted") || logsText.includes("truncated") || logsText.includes("UnpicklingError")) {
+                  setConsoleLines((ls) => [...ls, "⚠️ Corrupted model detected - training new model..."]);
+                }
+              } catch {}
+            }
+          } else {
+            setConsoleLines((ls) => [...ls, "✅ Run completed successfully"]);
+          }
 
           try {
             if (metricsArt?.url) {
@@ -460,7 +609,6 @@ export default function BehaviourTest() {
             setCsvInfo({ headers: [], rows: [] });
           }
 
-          setConsoleLines((ls) => [...ls, "Run completed"]);
           setTimeout(refreshRuns, 500);
         }
       } catch {}
@@ -477,21 +625,21 @@ export default function BehaviourTest() {
           username,
           projectName,
           "metrics.json",
-          `artifacts-behaviour/run_${rid}`
+          `artifacts/versions/${selectedVersion}/behaviour/run_${rid}`
         );
         setMetrics(JSON.parse(txt || "{}"));
       } catch {
         setMetrics(null);
       }
       setConfusionURL(
-        s3DownloadUrl(username, projectName, `artifacts-behaviour/run_${rid}`, "confusion_matrix.png")
+        s3DownloadUrl(username, projectName, `artifacts/versions/${selectedVersion}/behaviour/run_${rid}`, "confusion_matrix.png")
       );
       try {
         const csvText = await StorageAPI.fetchTextFile(
           username,
           projectName,
           "tests.csv",
-          `artifacts-behaviour/run_${rid}`
+          `artifacts/versions/${selectedVersion}/behaviour/run_${rid}`
         );
         setCsvInfo(parseCSV(csvText));
       } catch {
@@ -554,21 +702,23 @@ export default function BehaviourTest() {
   };
 
   const onRefine = async () => {
-    if (!selectedRunId && !runId) {
-      alert("Run once before refining.");
-      return;
-    }
     setBusy(true);
     try {
-      const srcRun = selectedRunId || runId;
-      const out = await refineTests(username, projectName, srcRun, scenarioInput.trim(), autoRunAfterRefine);
+      // Use latest prompt with an id; backend requires promptId.
+      const latestPrompt = (prompts || []).find((p) => p && (p.id != null));
+      if (!latestPrompt) {
+        alert("No saved prompt found. Save a prompt first in 'Scenarios & Refinement'.");
+        setBusy(false);
+        return;
+      }
+      const out = await refineTests(username, projectName, selectedVersion, latestPrompt.id, autoRunAfterRefine);
       refreshPrompts();
       refreshRuns();
       if (out?.newRunId) {
         setRunId(out.newRunId);
         setConsoleLines(["Refine activated; auto-run started…"]);
       } else {
-        setConsoleLines([`Refine activated: ${out?.canonicalKey || "tests.yaml updated"}`]);
+        setConsoleLines([`Refine activated for prompt #${latestPrompt.id}`]);
       }
       await loadEditorsFromPreProcessed();
     } catch (e) {
@@ -576,6 +726,48 @@ export default function BehaviourTest() {
     } finally {
       setBusy(false);
     }
+  };
+
+  /* view artifact file */
+  const viewArtifactFile = async (fileName) => {
+    if (!projectName || !selectedVersion) return;
+    try {
+      const folder = artifactPath
+        ? `artifacts/versions/${selectedVersion}/${artifactPath}`
+        : `artifacts/versions/${selectedVersion}`;
+      const content = await StorageAPI.fetchTextFile(
+        username,
+        projectName,
+        fileName,
+        folder
+      );
+      setArtifactContent(content || "");
+      setViewingArtifact(fileName);
+    } catch (e) {
+      // If backend treats this as a folder (like StorageView's fallback), enter it
+      const body = (e && (e._body || e.body)) ? (e._body || e.body) : ((e && e.message) || "");
+      const status = e && (e._status || e.status);
+      const looksLikeFolder =
+        (typeof body === 'string' && (body.includes('NoSuchKey') || body.includes('does not exist'))) ||
+        [404, 400, 500].includes(status);
+      if (looksLikeFolder) {
+        // Attempt to navigate into it as a folder
+        enterArtifactDir(fileName);
+      } else {
+        alert(`Failed to load ${fileName}: ${e.message}`);
+      }
+    }
+  };
+
+  const onArtifactItemClick = async (it) => {
+    if (it.isDir) {
+      enterArtifactDir(it.name);
+      return;
+    }
+    // Try to view; if server says folder, navigate into it
+    try {
+      await viewArtifactFile(it.name);
+    } catch {}
   };
 
   /* derived scenario table */
@@ -589,10 +781,15 @@ export default function BehaviourTest() {
   }, [csvInfo, csvSearch]);
   const pageRows = filteredRows.slice((csvPage - 1) * pageSize, csvPage * pageSize);
 
-  // editor gate
-  const hasDriver = files.some((f) => f.name === "driver.py");
-  const hasTests = files.some((f) => f.name === "tests.yaml");
-  const readyForEditor = hasDriver && hasTests;
+  // editor gate - check both pre-processed files AND artifact files
+  const hasDriverPreprocessed = files.some((f) => f.name === "driver.py");
+  const hasTestsPreprocessed = files.some((f) => f.name === "tests.yaml");
+  const hasDriverArtifact = artifactFiles.includes("driver.py");
+  const hasTestsArtifact = artifactFiles.includes("tests.yaml");
+  const hasDriver = hasDriverPreprocessed || hasDriverArtifact;
+  const hasTests = hasTestsPreprocessed || hasTestsArtifact;
+  const readyForEditor = hasDriverPreprocessed && hasTestsPreprocessed;
+  const readyForRun = hasDriver && hasTests; // Can run if files exist in either location
 
   /* ========================== UI ========================== */
   return (
@@ -618,9 +815,17 @@ export default function BehaviourTest() {
               </option>
             ))}
           </select>
-          <Btn onClick={generateTestsSmart} disabled={genBusy || !projectName}>
-            {genBusy ? "Generating…" : hasDriver ? "Generate tests.yaml (50–100 scenarios)" : "Generate driver + tests.yaml"}
-          </Btn>
+          <select
+            value={selectedVersion}
+            onChange={(e) => setSelectedVersion(e.target.value)}
+            className="bg-transparent border px-2 py-1 rounded"
+          >
+            {versions.map((v) => (
+              <option key={v} value={v} className="bg-black">
+                {v}
+              </option>
+            ))}
+          </select>
           {readyForEditor && (
             <>
               <Btn onClick={saveAndApprove} disabled={busy || !projectName}>
@@ -630,6 +835,11 @@ export default function BehaviourTest() {
                 {busy ? "Starting…" : "Approve & Run"}
               </Btn>
             </>
+          )}
+          {!readyForEditor && readyForRun && (
+            <Btn variant="primary" onClick={approveAndRun} disabled={busy || !projectName}>
+              {busy ? "Starting…" : "Run Tests"}
+            </Btn>
           )}
         </div>
       </div>
@@ -667,6 +877,65 @@ export default function BehaviourTest() {
                 />
                 Auto-run after refine
               </label>
+            </div>
+          </Card>
+
+          <Card title="Artifact Browser">
+            <div className="text-xs text-white/60 mb-2">
+              /artifacts/versions/{selectedVersion}{artifactPath ? `/${artifactPath}` : ''}
+            </div>
+            <div className="space-y-2 max-h-[240px] overflow-auto border border-white/10 rounded p-2">
+              {artifactPath && (
+                <div className="flex items-center justify-between text-sm bg-white/5 rounded p-2 cursor-pointer" onClick={upArtifact}>
+                  <span className="text-white/80">↩️ ..</span>
+                  <span className="text-white/50">Up</span>
+                </div>
+              )}
+              {artifactList.length ? (
+                artifactList.map((it) => (
+                  <div
+                    key={it.name}
+                    className="flex items-center justify-between text-sm bg-white/5 rounded p-2 cursor-pointer"
+                    onClick={() => onArtifactItemClick(it)}
+                  >
+                    <span className={`${it.isDir ? 'hover:underline' : ''} text-white/80`}>
+                      {it.name.replace(/\/$/, '')}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {!it.isDir && (
+                        <Btn variant="ghost" onClick={(e) => { e.stopPropagation(); viewArtifactFile(it.name); }}>View</Btn>
+                      )}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-white/60 text-sm">This folder is empty.</div>
+              )}
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <Btn variant="ghost" onClick={loadArtifactFiles}>Refresh</Btn>
+            </div>
+            
+            {/* Generate Driver and Tests Section */}
+            <div className="mt-4 border-t border-white/10 pt-4">
+              <div className="text-sm font-semibold text-white/80 mb-2">Generate Driver & Tests</div>
+              <div className="space-y-2">
+                <textarea
+                  className="w-full bg-[#121235] border border-white/10 rounded px-2 py-2 text-sm text-white placeholder-white/40"
+                  placeholder="Enter brief description for generation (e.g., Generate driver and tests for cat vs dog classifier and this is the version 2 we also have the model.pt file present we can use them for training)"
+                  value={briefInput}
+                  onChange={(e) => setBriefInput(e.target.value)}
+                  rows={3}
+                />
+                <Btn 
+                  variant="primary" 
+                  className="w-full"
+                  onClick={handleGenerateDriverAndTests}
+                  disabled={generatingFiles || !briefInput.trim()}
+                >
+                  {generatingFiles ? "Generating..." : "Generate Driver & Tests"}
+                </Btn>
+              </div>
             </div>
           </Card>
 
@@ -745,6 +1014,23 @@ export default function BehaviourTest() {
 
         {/* right */}
         <div className="space-y-5">
+          {viewingArtifact && (
+            <Card title={`Viewing: ${viewingArtifact}`}>
+              <div className="flex justify-between items-center mb-3">
+                <div className="text-sm text-white/60">Artifact from {selectedVersion}</div>
+                <Btn variant="ghost" onClick={() => setViewingArtifact(null)}>
+                  Close
+                </Btn>
+              </div>
+              <Editor
+                height="300px"
+                language={ext(viewingArtifact) === "py" ? "python" : ext(viewingArtifact) === "yaml" ? "yaml" : "plaintext"}
+                theme="vs-dark"
+                value={artifactContent}
+                options={{ readOnly: true, minimap: { enabled: false }, fontSize: 14 }}
+              />
+            </Card>
+          )}
           <Card title="Project Files (pre-processed)">
             <div className="flex gap-2 mb-3 border-b border-white/10 overflow-x-auto">
               {readyForEditor &&

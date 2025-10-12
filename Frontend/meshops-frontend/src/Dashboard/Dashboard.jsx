@@ -4,6 +4,8 @@ import SidePanel from "./SidePanel";
 import StorageView from "./StorageView";
 import PreProcess from "./PreProcess"; // ⬅️ added
 import BehaviourTest from "./BehaviourTest";
+import UnitTest from "./UnitTest";
+import Retrain from "./Retrain";
 
 const Stub = ({ title }) => (
   <div className="p-8 text-white">
@@ -22,6 +24,8 @@ const Dashboard = () => {
           <Route path="storage" element={<StorageView />} />
           <Route path="pre-process" element={<PreProcess />} /> {/* ⬅️ added */}
           <Route path="behaviour-test" element={<BehaviourTest />} /> {/* ⬅️ added */}
+          <Route path="unit-test" element={<UnitTest />} /> {/* ⬅️ added */}
+          <Route path="retrain" element={<Retrain />} /> {/* ⬅️ added */}
           <Route path="*" element={<Stub title="Not Found" />} />
         </Routes>
       </main>

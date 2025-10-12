@@ -95,6 +95,15 @@ public class PlanService {
         if (in.startsWith("s3://")) return S3KeyUtil.keyOf(in);
         if (in.startsWith("/")) in = in.substring(1);
         while (in.endsWith("/")) in = in.substring(0, in.length() - 1);
+        // strip trailing pre-processed
+        if (in.endsWith("/pre-processed")) {
+            in = in.substring(0, in.length() - "/pre-processed".length());
+        }
+        // strip any artifacts/versions/... suffix to get project root
+        int idx = in.indexOf("/artifacts/versions/");
+        if (idx >= 0) {
+            in = in.substring(0, idx);
+        }
         return in;
     }
 
@@ -110,7 +119,8 @@ public class PlanService {
             project.setTestsKey(req.getTestsKey().trim());
         }
         if (req.getS3Prefix() != null && !req.getS3Prefix().isBlank()) {
-            project.setS3Prefix(req.getS3Prefix().trim());
+            String sanitized = normalizeBaseKey(req.getS3Prefix().trim());
+            project.setS3Prefix(sanitized);
         }
 
         project.setApproved(req.getApproved() != null ? req.getApproved() : false);

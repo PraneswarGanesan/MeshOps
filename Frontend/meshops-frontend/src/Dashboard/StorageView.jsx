@@ -1,6 +1,7 @@
 // src/Dashboard/StorageView.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
+import { StorageAPI } from "../api/storage";
 
 /* ---------------- Theme ---------------- */
 const COLORS = {
@@ -182,6 +183,37 @@ export default function StorageView() {
     const ct = res.headers.get("content-type") || "";
     if (ct.includes("application/json")) return res.json();
     return res;
+  };
+
+  // Create new project: S3 folder create (8081) then ensure in MySQL (8082)
+  const createNewProject = async () => {
+    const name = prompt("Enter new project name:");
+    if (!name) return;
+    try {
+      setStatus("Creating project…");
+      const s3Msg = await StorageAPI.createProject(username, name);
+      console.log("[createProject]", s3Msg);
+
+      // Build s3Prefix and ensure in projects service
+      const payload = {
+        username,
+        projectName: name,
+        s3Prefix: `s3://my-users-meshops-bucket/${username}/${name}/`,
+      };
+      console.log("[ensureProject] payload:", payload);
+      await StorageAPI.ensureProject(username, name);
+
+      // Refresh projects and select new one
+      await loadProjects();
+      setProject(name);
+      setPath("");
+      setStatus("Project created and ensured");
+      alert("Project created successfully");
+    } catch (e) {
+      console.error(e);
+      setStatus(e.message || "Failed to create project");
+      alert("Failed: " + (e.message || String(e)));
+    }
   };
   const fileURL = (name, useFolder = true) => {
     const u = new URL(
@@ -392,7 +424,7 @@ export default function StorageView() {
               <div className="grid md:grid-cols-3 gap-3">
                 <div>
                   <div className="text-[11px] uppercase tracking-wider" style={{ color: COLORS.textSoft }}>Project</div>
-                  <div className="relative">
+                  <div className="relative flex items-center gap-2">
                     <select
                       className="w-full appearance-none rounded-xl px-3 py-2 pr-10 bg-transparent border outline-none transition focus:shadow-[0_0_0_3px_rgba(212,175,55,0.25)]"
                       style={{ borderColor: COLORS.border, color: "white" }}
@@ -403,6 +435,10 @@ export default function StorageView() {
                       {projects.map((p)=>(<option key={p} value={p} className="bg-black">{p}</option>))}
                     </select>
                     <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 opacity-70"><Icon.ChevronR/></span>
+                    <button onClick={createNewProject} className="px-3 py-2 rounded-xl border text-xs"
+                            style={{ borderColor: COLORS.border }}>
+                      New Project
+                    </button>
                   </div>
                 </div>
                 <div>

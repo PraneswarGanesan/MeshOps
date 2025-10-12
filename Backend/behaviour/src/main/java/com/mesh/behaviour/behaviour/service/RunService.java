@@ -116,15 +116,15 @@ public class RunService {
         // ✅ Force cleanup before each run
         commands.add("rm -rf /tmp/project_version/* || true");
         commands.add("rm -f /opt/automesh/runner.py || true");
-        commands.add("mkdir -p /opt/automesh /tmp/project_version/pre-processed");
-
         // ✅ Always pull fresh runner.py
         commands.add("aws s3 cp \"" + s3Runner + "\" /opt/automesh/runner.py");
         commands.add("chmod +x /opt/automesh/runner.py");
 
-        // ✅ Always pull fresh driver + tests.yaml
+        // ✅ Always pull fresh driver + tests.yaml + model (if exists)
         commands.add("aws s3 cp \"" + remoteBase + "driver.py\" /tmp/project_version/driver.py || true");
         commands.add("aws s3 cp \"" + remoteBase + "tests.yaml\" /tmp/project_version/tests.yaml || true");
+        commands.add("aws s3 cp \"" + remoteBase + "model.pt\" /tmp/project_version/model.pt || true");
+        commands.add("aws s3 cp \"" + remoteBase + "model.pkl\" /tmp/project_version/model.pkl || true");
 
         // ✅ Preprocessed data sync (always overwrite)
         commands.add("aws s3 cp \"" + s3Preproc + "\" /tmp/project_version/pre-processed/ --recursive || true");
