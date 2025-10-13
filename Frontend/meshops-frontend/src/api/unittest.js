@@ -66,9 +66,11 @@ export async function saveUnitTestPrompt(username, projectName, message, runId) 
 }
 
 export async function listUnitTestPrompts(username, projectName, limit = 12) {
-  const url = `${BASE}/api/unit-tests/${encodeURIComponent(username)}/${encodeURIComponent(
+  // Using the refiner service endpoint with fixed version "v1"
+  const versionLabel = "v1"; // Using a fixed version label
+  const url = `${BASE}/api/refiner/${encodeURIComponent(username)}/${encodeURIComponent(
     projectName
-  )}/prompts?limit=${limit}`;
+  )}/${encodeURIComponent(versionLabel)}/prompts?limit=${limit}`;
   try {
     const res = await fetch(url, {
       headers: { 

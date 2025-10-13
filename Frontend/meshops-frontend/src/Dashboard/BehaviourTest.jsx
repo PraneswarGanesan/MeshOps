@@ -108,8 +108,8 @@ async function approvePlanFull({ username, projectName, versionLabel }) {
   console.log("[approvePlanFull]", { username, projectName, versionLabel, driverKey, testsKey });
   return await approvePlan({ username, projectName, versionLabel, driverKey, testsKey, approved: true });
 }
-async function saveScenarioPrompt(u, p, message, runId) {
-  const url = `${BASE_SCENARIOS}/${encodeURIComponent(u)}/${encodeURIComponent(p)}/prompts`;
+async function saveScenarioPrompt(u, p, versionLabel = "v1", message, runId) {
+  const url = `${BASE_SCENARIOS}/${encodeURIComponent(u)}/${encodeURIComponent(p)}/${encodeURIComponent(versionLabel)}/prompts`;
   const res = await fetch(url, {
     method: "POST",
     headers: { 
@@ -123,10 +123,10 @@ async function saveScenarioPrompt(u, p, message, runId) {
   if (!res.ok) throw new Error((await res.text()) || "Failed to save prompt");
   return res.json();
 }
-async function listScenarioPrompts(username, projectName, limit = 12) {
+async function listScenarioPrompts(username, projectName, versionLabel = "v1", limit = 12) {
   const url = `${BASE_SCENARIOS}/${encodeURIComponent(username)}/${encodeURIComponent(
     projectName
-  )}/prompts?limit=${limit}`;
+  )}/${encodeURIComponent(versionLabel)}/prompts?limit=${limit}`;
   try {
     const res = await fetch(url, {
       headers: { 
@@ -231,11 +231,11 @@ export default function BehaviourTest() {
   useEffect(() => {
     (async () => {
       if (!projectName) return;
-      const list = await listScenarioPrompts(username, projectName, 12);
+      const list = await listScenarioPrompts(username, projectName, selectedVersion, 12);
       setPrompts(list || []);
     })();
-  }, [username, projectName]);
-  const refreshPrompts = async () => setPrompts(await listScenarioPrompts(username, projectName, 12));
+  }, [username, projectName, selectedVersion]);
+  const refreshPrompts = async () => setPrompts(await listScenarioPrompts(username, projectName, selectedVersion, 12));
 
   /* load versions */
   const loadVersions = async () => {
@@ -655,7 +655,7 @@ export default function BehaviourTest() {
   const onSavePrompt = async () => {
     if (!scenarioInput.trim()) return;
     try {
-      await saveScenarioPrompt(username, projectName, scenarioInput.trim(), selectedRunId || runId || null);
+      await saveScenarioPrompt(username, projectName, selectedVersion, scenarioInput.trim(), selectedRunId || runId || null);
       setScenarioInput("");
       refreshPrompts();
       setConsoleLines((ls) => [...ls, "Prompt saved."]);
