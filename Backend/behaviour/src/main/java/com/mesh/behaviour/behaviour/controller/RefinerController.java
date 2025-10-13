@@ -10,8 +10,8 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/refiner")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*", allowedHeaders = "*",
-        methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.OPTIONS})
+@CrossOrigin(origins = "http://localhost:5173", allowCredentials = "true")
+
 public class RefinerController {
 
     private final RefinerService refinerService;

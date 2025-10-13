@@ -43,8 +43,16 @@ public class UnitTestService {
 
         Project project = projects.findByUsernameAndProjectName(username, projectName)
                 .orElseThrow(() -> new IllegalArgumentException("Project not found"));
-        Run run = runs.findById(runId)
-                .orElseThrow(() -> new IllegalArgumentException("Run not found: " + runId));
+        Run run = runs.findById(runId).orElse(null);
+        if (run == null) {
+            log.warn("Run {} not found. Proceeding without run linkage.", runId);
+            run = new Run();
+            run.setId(runId);
+            run.setUsername(username);
+            run.setProjectName(projectName);
+        }
+
+
 
         if (!username.equalsIgnoreCase(run.getUsername()) ||
                 !projectName.equalsIgnoreCase(run.getProjectName())) {

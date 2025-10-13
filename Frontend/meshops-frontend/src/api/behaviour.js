@@ -92,10 +92,10 @@ export function generateCatDogClassifier(brief) {
   }).then((r) => toJson(r, url));
 }
 
-export function refineByPromptId(username, projectName, versionLabel, promptId, autoRun = false) {
-  // POST /api/refiner/{u}/{p}/{v}/refine?promptId=...&autoRun=false
-  const base = `${BASE}/api/refiner/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/${encodeURIComponent(versionLabel)}/refine`;
-  const url = `${base}?promptId=${encodeURIComponent(promptId)}&autoRun=${autoRun ? "true" : "false"}`;
+export function refineByPromptId(username, projectName, versionLabel, promptId) {
+  const url = `${BASE}/api/refiner/${encodeURIComponent(username)}/${encodeURIComponent(projectName)}/${encodeURIComponent(versionLabel)}/refine?promptId=${encodeURIComponent(promptId)}&autoRun=false`;
   console.log("[refineByPromptId] POST", url);
   return fetch(url, { method: "POST" }).then((r) => toJson(r, url));
 }
+
+

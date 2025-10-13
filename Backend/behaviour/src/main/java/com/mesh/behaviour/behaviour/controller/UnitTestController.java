@@ -10,7 +10,7 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/unit-tests")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*", allowedHeaders = "*", methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.OPTIONS})
+@CrossOrigin(origins = "http://localhost:5173", allowCredentials = "true")
 public class UnitTestController {
 
     private final UnitTestService unitTestService;
