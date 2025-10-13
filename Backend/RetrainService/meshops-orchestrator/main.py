@@ -5,8 +5,10 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import boto3
 
 from aws_utils import (
     parse_s3_path,
@@ -16,14 +18,24 @@ from aws_utils import (
     get_ssm_command_output,
 )
 from ec2_utils import create_instance
-import boto3
 
 # --------------------------
 # Load environment variables
 # --------------------------
 load_dotenv()
 
+# ✅ Create FastAPI app only once
 app = FastAPI(title="meshops-retrain-service", version="3.0")
+
+# ✅ Enable CORS globally
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],        # Allow all origins (frontend 5173 included)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# --------------------------
 
 # --------------------------
 # AWS Configuration
@@ -51,11 +63,11 @@ jobs_store: Dict[str, Dict[str, Any]] = {}
 class RetrainRequest(BaseModel):
     username: str
     projectName: str
-    files: List[str]                               # User’s training files
-    saveBase: str                                  # Output directory in S3
+    files: List[str]
+    saveBase: str
     version: Optional[str] = None
-    requirementsPath: Optional[str] = None         # User’s requirements file
-    extraArgs: Optional[List[str]] = []            # Reserved for future use
+    requirementsPath: Optional[str] = None
+    extraArgs: Optional[List[str]] = []
 
 
 class StatusView(BaseModel):
@@ -108,15 +120,9 @@ def _ensure_sandbox() -> str:
 
 
 def _sync_and_run_job(job_id: str, save_base: str, requirements_path: str, files: list, instance_id: str):
-    """
-    Sync retrain scripts from S3 to /opt/meshops on EC2 and execute run_retrain.sh
-    """
     req_arg = f"'{requirements_path}'" if requirements_path else "''"
     files_arg = " ".join([f"'{f}'" for f in files]) if files else ""
 
-    # -----------------------------------------------------------
-    # NOTE: We export AWS_S3_BUCKET and AWS_REGION here
-    # -----------------------------------------------------------
     cmd = f"""
 set -eux
 mkdir -p /opt/meshops
@@ -128,7 +134,6 @@ if [ -f requirements.txt ]; then pip3 install -r requirements.txt; fi
 chmod +x run_retrain.sh
 ./run_retrain.sh "{job_id}" "{save_base}" {req_arg} {files_arg}
 """
-
     try:
         cmd_id = run_command_via_ssm(instance_id, cmd)
         jobs_store[job_id]["command_id"] = cmd_id
@@ -145,7 +150,6 @@ chmod +x run_retrain.sh
 @app.post("/retrain", response_model=StatusView)
 def retrain(req: RetrainRequest, background_tasks: BackgroundTasks):
     job_id = _generate_job_id(req.username, req.projectName)
-
     s3_report = f"s3://{S3_BUCKET}/{req.saveBase}/retrained/final_retrain_report.json"
 
     jobs_store[job_id] = {
@@ -176,43 +180,6 @@ def get_status(job_id: str):
     job = jobs_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="jobId not found")
-
-    last_console = None
-    if "command_id" in job and job.get("instance_id"):
-        try:
-            out = get_ssm_command_output(job["instance_id"], job["command_id"])
-            last_console = out
-            job["last_console"] = out
-
-            ssm_status = out.get("status")
-            if ssm_status in ("Failed", "Cancelled", "TimedOut"):
-                job["status"] = "FAILED"
-            elif ssm_status == "Success":
-                job["status"] = "COMPLETED"
-            else:
-                job["status"] = "RUNNING"
-        except Exception as e:
-            job["last_console_error"] = str(e)
-
-    try:
-        bucket, key = parse_s3_path(job["s3_report"])
-        if s3_key_exists(bucket, key):
-            report = s3_get_json(bucket, key)
-            job["status"] = "COMPLETED"
-            job["report"] = report
-
-            return StatusView(
-                jobId=job_id,
-                status="COMPLETED",
-                s3_report=job["s3_report"],
-                report=report,
-                last_console=last_console,
-                instance_id=job.get("instance_id"),
-                command_id=job.get("command_id"),
-            )
-    except Exception:
-        pass
-
     return StatusView(
         jobId=job_id,
         status=job.get("status", "UNKNOWN"),
