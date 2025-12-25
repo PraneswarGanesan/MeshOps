@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import shutil
 from threading import RLock
 from typing import Dict, Any
 
@@ -28,7 +29,17 @@ class StateStore:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(obj, f, indent=2)
-        os.replace(tmp, self.path)
+
+        # retry loop in case Windows Defender locks the file
+        for attempt in range(5):
+            try:
+                # prefer shutil.move on Windows—it handles cross-device locks better
+                shutil.move(tmp, self.path)
+                break
+            except PermissionError:
+                time.sleep(0.1)  # wait 100 ms and try again
+        else:
+            print(f"[WARN] Could not safely replace {self.path}, skipping update")
 
     def get(self) -> Dict[str, Any]:
         with self._lock:

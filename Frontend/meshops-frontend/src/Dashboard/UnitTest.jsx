@@ -798,135 +798,266 @@ const onRefine = async () => {
   /* ========================== UI ========================== */
   return (
     <div className="min-h-screen text-white relative">
-      {/* header */}
-      <div className="sticky top-0 z-20 bg-[#0B0B1A]/80 backdrop-blur border-b border-white/10 px-5 py-4 flex items-center justify-between">
-        <div>
-          <div className="text-xs text-white/60">Testing Suite</div>
-          <div className="text-xl font-semibold">Unit Testing</div>
-        </div>
-        <div className="flex items-center gap-3">
-          <select
-            value={projectName}
-            onChange={(e) => {
-              setProjectName(e.target.value);
-              localStorage.setItem("activeProject", e.target.value);
-            }}
-            className="bg-transparent border px-2 py-1 rounded"
-          >
-            {projects.map((p) => (
-              <option key={p} value={p} className="bg-black">
-                {p}
-              </option>
-            ))}
-          </select>
-          <select
-            value={selectedVersion}
-            onChange={(e) => setSelectedVersion(e.target.value)}
-            className="bg-transparent border px-2 py-1 rounded"
-          >
-            {versions.map((v) => (
-              <option key={v} value={v} className="bg-black">
-                {v}
-              </option>
-            ))}
-          </select>
-          {readyForEditor && (
-            <>
-              <Btn onClick={saveAndApprove} disabled={busy || !projectName}>
-                Save & Approve
-              </Btn>
+      {/* Premium Unit Testing Header */}
+      <div className="sticky top-0 z-20 backdrop-blur-xl border-b"
+          style={{ 
+            background: 'rgba(10, 10, 15, 0.85)',
+            borderColor: 'rgba(217, 158, 40, 0.15)',
+            boxShadow: '0 4px 24px rgba(0, 0, 0, 0.4)'
+          }}>
+        <div className="px-6 py-5 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500 via-amber-600 to-blue-600 shadow-lg shadow-amber-500/30 flex items-center justify-center">
+              <span className="text-white font-bold text-lg">U</span>
+            </div>
+            <div>
+              <div className="text-xs font-medium uppercase tracking-wider" 
+                  style={{ color: 'rgba(217, 158, 40, 0.7)' }}>
+                Testing Suite
+              </div>
+              <div className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-amber-200 to-blue-300">
+                Unit Testing
+              </div>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-3">
+            <select
+              value={projectName}
+              onChange={(e) => {
+                setProjectName(e.target.value);
+                localStorage.setItem("activeProject", e.target.value);
+              }}
+              className="bg-transparent border rounded-xl px-4 py-2.5 outline-none transition-all duration-300 focus:border-amber-400/40 focus:shadow-[0_0_0_3px_rgba(217,158,40,0.15)] hover:border-amber-400/30"
+              style={{ 
+                borderColor: 'rgba(217, 158, 40, 0.2)',
+                background: 'rgba(0, 0, 0, 0.3)',
+                color: 'white'
+              }}
+            >
+              {projects.map((p) => (
+                <option key={p} value={p} className="bg-black">
+                  {p}
+                </option>
+              ))}
+            </select>
+            
+            <select
+              value={selectedVersion}
+              onChange={(e) => setSelectedVersion(e.target.value)}
+              className="bg-transparent border rounded-xl px-4 py-2.5 outline-none transition-all duration-300 focus:border-amber-400/40 focus:shadow-[0_0_0_3px_rgba(217,158,40,0.15)] hover:border-amber-400/30"
+              style={{ 
+                borderColor: 'rgba(217, 158, 40, 0.2)',
+                background: 'rgba(0, 0, 0, 0.3)',
+                color: 'white'
+              }}
+            >
+              {versions.map((v) => (
+                <option key={v} value={v} className="bg-black">
+                  {v}
+                </option>
+              ))}
+            </select>
+            
+            {readyForEditor && (
+              <>
+                <Btn onClick={saveAndApprove} disabled={busy || !projectName}>
+                  Save & Approve
+                </Btn>
+                <Btn variant="primary" onClick={approveAndRun} disabled={busy || !projectName}>
+                  {busy ? "Starting…" : "Approve & Run"}
+                </Btn>
+              </>
+            )}
+            {!readyForEditor && readyForRun && (
               <Btn variant="primary" onClick={approveAndRun} disabled={busy || !projectName}>
-                {busy ? "Starting…" : "Approve & Run"}
+                {busy ? "Starting…" : "Run Tests"}
               </Btn>
-            </>
-          )}
-          {!readyForEditor && readyForRun && (
-            <Btn variant="primary" onClick={approveAndRun} disabled={busy || !projectName}>
-              {busy ? "Starting…" : "Run Tests"}
-            </Btn>
-          )}
+            )}
+          </div>
         </div>
       </div>
 
       {/* main split */}
       <div className="max-w-[1400px] mx-auto p-5 grid grid-cols-1 lg:grid-cols-[360px_minmax(0,1fr)] gap-5">
         {/* left */}
-        <div className="space-y-5">
-          <Card title="Scenarios & Refinement">
+        <div className="space-y-6">
+        {/* Scenarios & Refinement Card */}
+        <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+            style={{ 
+              borderColor: 'rgba(217, 158, 40, 0.15)', 
+              background: 'rgba(15, 15, 24, 0.6)',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+            }}>
+          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+              style={{
+                background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+                backgroundSize: '200% 100%',
+                animation: 'shimmer 3s infinite'
+              }} />
+          
+          <div className="relative z-10">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                <span className="text-amber-400 text-sm">✨</span>
+              </div>
+              <div className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300">
+                Scenarios & Refinement
+              </div>
+            </div>
+            
             <textarea
               value={scenarioInput}
               onChange={(e) => setScenarioInput(e.target.value)}
               rows={6}
-              placeholder='Describe refinements or paste a generation request (e.g., "Generate 5 realistic credit card fraud detection scenarios with boundary values …").'
-              className="w-full bg-[#121235] border border-white/10 rounded px-3 py-2 text-sm text-white placeholder-white/40"
+              placeholder='Describe refinements or paste a generation request (e.g., "Generate 5 realistic credit card fraud detection scenarios with boundary values…").'
+              className="w-full rounded-xl border px-4 py-3 text-sm text-white placeholder-white/40 outline-none transition-all duration-300 focus:border-amber-400/40 focus:shadow-[0_0_0_3px_rgba(217,158,40,0.15)] resize-none"
+              style={{ 
+                background: 'rgba(0, 0, 0, 0.4)', 
+                borderColor: 'rgba(217, 158, 40, 0.2)'
+              }}
             />
-            <div className="flex flex-wrap items-center gap-3 mt-2">
+            
+            <div className="flex flex-wrap items-center gap-2 mt-4">
               <Btn onClick={onSavePrompt} disabled={busy || !scenarioInput.trim()}>
-                Save Prompt
+                💾 Save Prompt
               </Btn>
               <Btn onClick={onGenerateScenarios} disabled={busy || !scenarioInput.trim()}>
-                Generate Scenarios
+                ⚡ Generate
               </Btn>
               <Btn onClick={onRunScenariosOnly} disabled={busy}>
-                Run Scenarios Only
+                ▶️ Run Only
               </Btn>
               <Btn variant="primary" onClick={onRefine} disabled={busy || (!selectedRunId && !runId)}>
-                {busy ? "Refining…" : "Refine Tests"}
+                {busy ? "⏳ Refining…" : "✨ Refine Tests"}
               </Btn>
-              <label className="text-xs flex items-center gap-2">
+              <label className="text-xs flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-all duration-200 hover:bg-amber-500/5"
+                    style={{ borderColor: 'rgba(217, 158, 40, 0.15)' }}>
                 <input
                   type="checkbox"
                   checked={autoRunAfterRefine}
                   onChange={(e) => setAutoRunAfterRefine(e.target.checked)}
+                  className="accent-amber-500"
                 />
-                Auto-run after refine
+                <span className="text-white/70">Auto-run after refine</span>
               </label>
             </div>
-          </Card>
+          </div>
+        </div>
 
-          <Card title="Artifact Browser">
-            <div className="text-xs text-white/60 mb-2">
+        {/* Artifact Browser Card */}
+        <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+            style={{ 
+              borderColor: 'rgba(217, 158, 40, 0.15)', 
+              background: 'rgba(15, 15, 24, 0.6)',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+            }}>
+          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+              style={{
+                background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+                backgroundSize: '200% 100%',
+                animation: 'shimmer 3s infinite'
+              }} />
+          
+          <div className="relative z-10">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                <span className="text-amber-400 text-sm">📁</span>
+              </div>
+              <div className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300">
+                Artifact Browser
+              </div>
+            </div>
+            
+            <div className="text-[10px] uppercase tracking-widest mb-3 font-medium px-3 py-2 rounded-lg"
+                style={{ 
+                  color: 'rgba(217, 158, 40, 0.8)',
+                  background: 'rgba(217, 158, 40, 0.05)',
+                  borderLeft: '3px solid rgba(217, 158, 40, 0.4)'
+                }}>
               /artifacts/versions/{selectedVersion}{artifactPath ? `/${artifactPath}` : ''}
             </div>
-            <div className="space-y-2 max-h-[240px] overflow-auto border border-white/10 rounded p-2">
+            
+            <div className="space-y-2 max-h-[240px] overflow-auto border rounded-xl p-3 custom-scrollbar"
+                style={{ 
+                  borderColor: 'rgba(217, 158, 40, 0.15)',
+                  background: 'rgba(0, 0, 0, 0.3)'
+                }}>
               {artifactPath && (
-                <div className="flex items-center justify-between text-sm bg-white/5 rounded p-2 cursor-pointer" onClick={upArtifact}>
-                  <span className="text-white/80">↩️ ..</span>
-                  <span className="text-white/50">Up</span>
+                <div className="flex items-center justify-between text-sm rounded-lg p-3 cursor-pointer transition-all duration-200"
+                    style={{ background: 'rgba(217, 158, 40, 0.05)' }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(217, 158, 40, 0.12)';
+                      e.currentTarget.style.transform = 'translateX(4px)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(217, 158, 40, 0.05)';
+                      e.currentTarget.style.transform = 'translateX(0)';
+                    }}
+                    onClick={upArtifact}>
+                  <span className="text-white/90 flex items-center gap-2">
+                    <span className="text-amber-400">↩️</span> ..
+                  </span>
+                  <span className="text-white/50 text-xs">Up</span>
                 </div>
               )}
               {artifactList.length ? (
                 artifactList.map((it) => (
                   <div
                     key={it.name}
-                    className="flex items-center justify-between text-sm bg-white/5 rounded p-2 cursor-pointer"
+                    className="flex items-center justify-between text-sm rounded-lg p-3 cursor-pointer transition-all duration-200"
+                    style={{ background: 'rgba(217, 158, 40, 0.05)' }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(217, 158, 40, 0.12)';
+                      e.currentTarget.style.transform = 'translateX(4px)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(217, 158, 40, 0.05)';
+                      e.currentTarget.style.transform = 'translateX(0)';
+                    }}
                     onClick={() => onArtifactItemClick(it)}
                   >
-                    <span className={`${it.isDir ? 'hover:underline' : ''} text-white/80`}>
+                    <span className={`${it.isDir ? 'text-amber-300 hover:text-amber-200' : 'text-white/80'} transition-colors flex items-center gap-2`}>
+                      <span className="text-amber-400/70">{it.isDir ? '📁' : '📄'}</span>
                       {it.name.replace(/\/$/, '')}
                     </span>
                     <div className="flex items-center gap-2">
                       {!it.isDir && (
-                        <Btn variant="ghost" onClick={(e) => { e.stopPropagation(); viewArtifactFile(it.name); }}>View</Btn>
+                        <Btn variant="ghost" onClick={(e) => { e.stopPropagation(); viewArtifactFile(it.name); }}>
+                          👁️ View
+                        </Btn>
                       )}
                     </div>
                   </div>
                 ))
               ) : (
-                <div className="text-white/60 text-sm">This folder is empty.</div>
+                <div className="text-white/60 text-sm text-center py-6">
+                  <div className="text-2xl mb-2 opacity-30">📭</div>
+                  This folder is empty.
+                </div>
               )}
             </div>
-            <div className="mt-2 flex items-center gap-2">
-              <Btn variant="ghost" onClick={loadArtifactFiles}>Refresh</Btn>
+            
+            <div className="mt-3 flex items-center gap-2">
+              <Btn variant="ghost" onClick={loadArtifactFiles}>
+                🔄 Refresh
+              </Btn>
             </div>
             
-            {/* Generate Driver and Tests Section */}
-            <div className="mt-4 border-t border-white/10 pt-4">
-              <div className="text-sm font-semibold text-white/80 mb-2">Generate Driver & Tests</div>
-              <div className="space-y-2">
+            {/* Generate Driver Section */}
+            <div className="mt-5 pt-5 border-t" style={{ borderColor: 'rgba(217, 158, 40, 0.15)' }}>
+              <div className="text-sm font-semibold mb-3 flex items-center gap-2">
+                <span className="text-amber-400">⚡</span>
+                <span className="text-amber-300/90">Generate Driver & Tests</span>
+              </div>
+              <div className="space-y-3">
                 <textarea
-                  className="w-full bg-[#121235] border border-white/10 rounded px-2 py-2 text-sm text-white placeholder-white/40"
-                  placeholder="Enter brief description for generation (e.g., Generate driver and tests for cat vs dog classifier and this is the version 2 we also have the model.pt file present we can use them for training)"
+                  className="w-full rounded-xl border px-4 py-3 text-sm text-white placeholder-white/40 outline-none transition-all duration-300 focus:border-amber-400/40 focus:shadow-[0_0_0_3px_rgba(217,158,40,0.15)] resize-none"
+                  style={{ 
+                    background: 'rgba(0, 0, 0, 0.4)', 
+                    borderColor: 'rgba(217, 158, 40, 0.2)'
+                  }}
+                  placeholder="Enter brief description for generation (e.g., Generate driver and tests for cat vs dog classifier…)"
                   value={briefInput}
                   onChange={(e) => setBriefInput(e.target.value)}
                   rows={3}
@@ -937,50 +1068,167 @@ const onRefine = async () => {
                   onClick={handleGenerateDriverAndTests}
                   disabled={generatingFiles || !briefInput.trim()}
                 >
-                  {generatingFiles ? "Generating..." : "Generate Driver & Tests"}
+                  {generatingFiles ? "⏳ Generating..." : "⚡ Generate Driver & Tests"}
                 </Btn>
               </div>
             </div>
-          </Card>
+          </div>
+        </div>
 
-          <Card title="Recent Feedback">
-            <div className="space-y-2 max-h-[280px] overflow-auto border border-white/10 rounded p-2">
+        {/* Recent Feedback Card */}
+        <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+            style={{ 
+              borderColor: 'rgba(217, 158, 40, 0.15)', 
+              background: 'rgba(15, 15, 24, 0.6)',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+            }}>
+          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+              style={{
+                background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+                backgroundSize: '200% 100%',
+                animation: 'shimmer 3s infinite'
+              }} />
+          
+          <div className="relative z-10">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                <span className="text-amber-400 text-sm">💬</span>
+              </div>
+              <div className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300">
+                Recent Feedback
+              </div>
+            </div>
+            
+            <div className="space-y-2 max-h-[280px] overflow-auto border rounded-xl p-3 custom-scrollbar"
+                style={{ 
+                  borderColor: 'rgba(217, 158, 40, 0.15)',
+                  background: 'rgba(0, 0, 0, 0.3)'
+                }}>
               {prompts?.length ? (
                 prompts.map((p) => (
-                  <div key={p.id || p.createdAt || p.message} className="text-sm bg-white/5 rounded p-2">
-                    <div className="text-white/80">{p.message}</div>
-                    <div className="text-[11px] text-white/50 mt-1">
-                      {p.createdAt ? new Date(p.createdAt).toLocaleString() : ""}
-                      {p.runId ? ` • run_${p.runId}` : ""}
+                  <div key={p.id || p.createdAt || p.message} 
+                      className="text-sm rounded-lg p-3 transition-all duration-200 border border-transparent hover:border-amber-400/20"
+                      style={{ background: 'rgba(217, 158, 40, 0.05)' }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(217, 158, 40, 0.1)';
+                        e.currentTarget.style.transform = 'translateY(-2px)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'rgba(217, 158, 40, 0.05)';
+                        e.currentTarget.style.transform = 'translateY(0)';
+                      }}>
+                    <div className="text-white/90 leading-relaxed">{p.message}</div>
+                    <div className="text-[10px] mt-2 font-medium flex items-center gap-2"
+                        style={{ color: 'rgba(217, 158, 40, 0.7)' }}>
+                      <span>⏱️</span>
+                      <span>
+                        {p.createdAt ? new Date(p.createdAt).toLocaleString() : ""}
+                        {p.runId ? ` • run_${p.runId}` : ""}
+                      </span>
                     </div>
                   </div>
                 ))
               ) : (
-                <div className="text-white/60 text-sm">No prompts yet.</div>
+                <div className="text-white/60 text-sm text-center py-6">
+                  <div className="text-2xl mb-2 opacity-30">💭</div>
+                  No prompts yet.
+                </div>
               )}
             </div>
-            <div className="mt-2">
+            
+            <div className="mt-3">
               <Btn variant="ghost" onClick={refreshPrompts}>
-                Refresh
+                🔄 Refresh
               </Btn>
             </div>
-          </Card>
+          </div>
+        </div>
 
-          <Card title="Console">
-            <pre className="bg-black/30 rounded p-3 text-xs max-h-[260px] overflow-auto">
-              {runId ? consoleLines.join("\n") || "Streaming…" : "Console appears after run starts"}
-            </pre>
-          </Card>
+        {/* Console Card */}
+        <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+            style={{ 
+              borderColor: 'rgba(217, 158, 40, 0.15)', 
+              background: 'rgba(15, 15, 24, 0.6)',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+            }}>
+          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+              style={{
+                background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+                backgroundSize: '200% 100%',
+                animation: 'shimmer 3s infinite'
+              }} />
+          
+          <div className="relative z-10">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                <span className="text-amber-400 text-sm">🖥️</span>
+              </div>
+              <div className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300">
+                Console
+              </div>
+            </div>
+            
+            <div className="rounded-xl p-4 border relative overflow-hidden"
+                style={{ 
+                  background: 'rgba(0, 0, 0, 0.5)',
+                  borderColor: 'rgba(217, 158, 40, 0.2)'
+                }}>
+              <div className="absolute top-2 right-2 flex gap-1">
+                <div className="w-2 h-2 rounded-full bg-red-500/40"></div>
+                <div className="w-2 h-2 rounded-full bg-amber-500/40"></div>
+                <div className="w-2 h-2 rounded-full bg-green-500/40"></div>
+              </div>
+              <pre className="text-xs max-h-[260px] overflow-auto font-mono custom-scrollbar pt-4"
+                  style={{ color: '#a1a1aa' }}>
+      {runId ? consoleLines.join("\n") || "⚡ Streaming…" : "💤 Console appears after run starts"}
+              </pre>
+            </div>
+          </div>
+        </div>
 
-          <Card title="Previous Runs">
-            <div className="flex items-center justify-between mb-3">
-              <div className="text-xs text-white/60">Accuracy trend (recent {trend.length || 0})</div>
+        {/* Previous Runs Card */}
+        <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+            style={{ 
+              borderColor: 'rgba(217, 158, 40, 0.15)', 
+              background: 'rgba(15, 15, 24, 0.6)',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+            }}>
+          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+              style={{
+                background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+                backgroundSize: '200% 100%',
+                animation: 'shimmer 3s infinite'
+              }} />
+          
+          <div className="relative z-10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                  <span className="text-amber-400 text-sm">📊</span>
+                </div>
+                <div className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300">
+                  Previous Runs
+                </div>
+              </div>
               <Btn variant="ghost" onClick={refreshRuns}>
-                Refresh
+                🔄 Refresh
               </Btn>
             </div>
+            
+            <div className="text-[10px] uppercase tracking-widest mb-3 font-medium px-3 py-2 rounded-lg"
+                style={{ 
+                  color: 'rgba(217, 158, 40, 0.8)',
+                  background: 'rgba(217, 158, 40, 0.05)'
+                }}>
+              📈 Accuracy trend (recent {trend.length || 0})
+            </div>
+            
             {trend.length ? (
-              <div className="h-24 mb-4">
+              <div className="h-28 mb-4 rounded-xl overflow-hidden border p-2"
+                  style={{ 
+                    background: 'rgba(0, 0, 0, 0.3)',
+                    borderColor: 'rgba(217, 158, 40, 0.15)'
+                  }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={trend.map((d, i) => ({ i, acc: d.acc }))}>
                     <XAxis dataKey="i" hide />
@@ -988,253 +1236,547 @@ const onRefine = async () => {
                     <Tooltip
                       formatter={(v) => (v == null ? "—" : Number(v).toFixed(4))}
                       labelFormatter={(i) => `Run ${trend[i]?.runId ?? ""}`}
+                      contentStyle={{ 
+                        background: 'rgba(0, 0, 0, 0.95)', 
+                        border: '1px solid rgba(217, 158, 40, 0.3)',
+                        borderRadius: '8px',
+                        padding: '8px 12px'
+                      }}
+                      labelStyle={{ color: '#d4af37' }}
                     />
-                    <Line type="monotone" dataKey="acc" stroke="#FFD700" dot={false} />
+                    <Line 
+                      type="monotone" 
+                      dataKey="acc" 
+                      stroke="rgb(217, 158, 40)" 
+                      strokeWidth={2.5} 
+                      dot={{ fill: 'rgb(217, 158, 40)', r: 4, strokeWidth: 2, stroke: 'rgba(0,0,0,0.5)' }}
+                      activeDot={{ r: 6 }}
+                    />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
             ) : (
-              <div className="text-white/50 text-sm mb-4">No trend yet.</div>
+              <div className="text-white/50 text-sm mb-4 text-center py-6 rounded-xl border"
+                  style={{ 
+                    background: 'rgba(0, 0, 0, 0.3)',
+                    borderColor: 'rgba(217, 158, 40, 0.1)'
+                  }}>
+                <div className="text-2xl mb-2 opacity-30">📈</div>
+                No trend yet.
+              </div>
             )}
+            
             {runs.length ? (
               <div className="flex flex-wrap gap-2">
                 {runs.map((r) => (
                   <Btn
                     key={r.runId}
-                    className={
-                      (selectedRunId === r.runId ? "border-yellow-400/60 text-yellow-300 " : "") + "px-3 py-1.5"
-                    }
+                    className={`px-4 py-2 transition-all duration-300 ${
+                      selectedRunId === r.runId 
+                        ? "shadow-lg" 
+                        : "hover:scale-105"
+                    }`}
+                    style={selectedRunId === r.runId ? {
+                      borderColor: 'rgba(217, 158, 40, 0.6)',
+                      background: 'rgba(217, 158, 40, 0.15)',
+                      color: '#d4af37',
+                      boxShadow: '0 0 20px rgba(217, 158, 40, 0.3)'
+                    } : {}}
                     onClick={() => setSelectedRunId(r.runId)}
                   >
-                    run_{r.runId}
+                    🏃 run_{r.runId}
                   </Btn>
                 ))}
               </div>
             ) : (
-              <div className="text-white/60 text-sm">No previous runs yet.</div>
+              <div className="text-white/60 text-sm text-center py-6 rounded-xl border"
+                  style={{ 
+                    background: 'rgba(0, 0, 0, 0.3)',
+                    borderColor: 'rgba(217, 158, 40, 0.1)'
+                  }}>
+                <div className="text-2xl mb-2 opacity-30">🏃</div>
+                No previous runs yet.
+              </div>
             )}
-          </Card>
+          </div>
         </div>
 
+        <style jsx>{`
+          @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+          }
+          .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+          }
+          .custom-scrollbar::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+          }
+          .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(217, 158, 40, 0.3);
+            border-radius: 10px;
+          }
+          .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: rgba(217, 158, 40, 0.5);
+          }
+        `}</style>
+      </div>
+
         {/* right */}
-        <div className="space-y-5">
+        <div className="space-y-6">
+          {/* Viewing Artifact Card */}
           {viewingArtifact && (
-            <Card title={`Viewing: ${viewingArtifact}`}>
-              <div className="flex justify-between items-center mb-3">
-                <div className="text-sm text-white/60">Artifact from {selectedVersion}</div>
-                <Btn variant="ghost" onClick={() => setViewingArtifact(null)}>
-                  Close
-                </Btn>
+            <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+                style={{ 
+                  borderColor: 'rgba(217, 158, 40, 0.15)', 
+                  background: 'rgba(15, 15, 24, 0.6)',
+                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+                }}>
+              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+                  style={{
+                    background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+                    backgroundSize: '200% 100%',
+                    animation: 'shimmer 3s infinite'
+                  }} />
+              
+              <div className="relative z-10">
+                <div className="flex justify-between items-center mb-4">
+                  <div>
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                        <span className="text-amber-400 text-sm">👁️</span>
+                      </div>
+                      <div className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300">
+                        Viewing: {viewingArtifact}
+                      </div>
+                    </div>
+                    <div className="text-xs px-3 py-1 rounded-lg inline-block"
+                        style={{ 
+                          color: 'rgba(217, 158, 40, 0.8)',
+                          background: 'rgba(217, 158, 40, 0.05)',
+                          border: '1px solid rgba(217, 158, 40, 0.2)'
+                        }}>
+                      📦 Artifact from {selectedVersion}
+                    </div>
+                  </div>
+                  <Btn variant="ghost" onClick={() => setViewingArtifact(null)}>
+                    ✕ Close
+                  </Btn>
+                </div>
+                <div className="rounded-xl overflow-hidden border"
+                    style={{ borderColor: 'rgba(217, 158, 40, 0.2)' }}>
+                  <Editor
+                    height="300px"
+                    language={ext(viewingArtifact) === "py" ? "python" : ext(viewingArtifact) === "yaml" ? "yaml" : "plaintext"}
+                    theme="vs-dark"
+                    value={artifactContent}
+                    options={{ readOnly: true, minimap: { enabled: false }, fontSize: 14 }}
+                  />
+                </div>
               </div>
-              <Editor
-                height="300px"
-                language={ext(viewingArtifact) === "py" ? "python" : ext(viewingArtifact) === "yaml" ? "yaml" : "plaintext"}
-                theme="vs-dark"
-                value={artifactContent}
-                options={{ readOnly: true, minimap: { enabled: false }, fontSize: 14 }}
-              />
-            </Card>
+            </div>
           )}
-          <Card title="Project Files (pre-processed)">
-            <div className="flex gap-2 mb-3 border-b border-white/10 overflow-x-auto">
-              {readyForEditor &&
-                files.map((f) => (
-                  <button
-                    key={f.name}
-                    onClick={() => setActiveFile(f.name)}
-                    className={`px-3 py-1 text-sm ${
-                      activeFile === f.name ? "border-b-2 border-yellow-400 text-yellow-300" : "text-white/60"
-                    }`}
-                  >
-                    {f.name}
-                  </button>
-                ))}
-              {!readyForEditor && (
-                <div className="text-xs text-white/50 px-2 py-1">
-                  driver.py & tests.yaml not ready. Click <b>Generate driver + tests.yaml</b>.
+
+          {/* Project Files Card */}
+          <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+              style={{ 
+                borderColor: 'rgba(217, 158, 40, 0.15)', 
+                background: 'rgba(15, 15, 24, 0.6)',
+                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+              }}>
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+                style={{
+                  background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+                  backgroundSize: '200% 100%',
+                  animation: 'shimmer 3s infinite'
+                }} />
+            
+            <div className="relative z-10">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                  <span className="text-amber-400 text-sm">📂</span>
+                </div>
+                <div className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300">
+                  Project Files (pre-processed)
+                </div>
+              </div>
+              
+              {/* File Tabs */}
+              <div className="flex gap-2 mb-4 pb-3 border-b overflow-x-auto custom-scrollbar"
+                  style={{ borderColor: 'rgba(217, 158, 40, 0.15)' }}>
+                {readyForEditor &&
+                  files.map((f) => (
+                    <button
+                      key={f.name}
+                      onClick={() => setActiveFile(f.name)}
+                      className={`px-4 py-2.5 text-sm rounded-lg transition-all duration-300 whitespace-nowrap font-medium ${
+                        activeFile === f.name 
+                          ? "shadow-lg scale-105" 
+                          : "hover:bg-amber-500/5"
+                      }`}
+                      style={activeFile === f.name ? {
+                        borderWidth: '2px',
+                        borderStyle: 'solid',
+                        borderColor: 'rgb(217, 158, 40)',
+                        background: 'rgba(217, 158, 40, 0.15)',
+                        color: '#d4af37',
+                        boxShadow: '0 0 20px rgba(217, 158, 40, 0.3)'
+                      } : {
+                        border: '1px solid rgba(217, 158, 40, 0.15)',
+                        color: 'rgba(255, 255, 255, 0.6)'
+                      }}
+                    >
+                      {f.name}
+                    </button>
+                  ))}
+                {!readyForEditor && (
+                  <div className="text-xs px-4 py-3 rounded-lg border"
+                      style={{ 
+                        color: 'rgba(255, 255, 255, 0.7)',
+                        background: 'rgba(217, 158, 40, 0.05)',
+                        borderColor: 'rgba(217, 158, 40, 0.2)'
+                      }}>
+                    📝 <b className="text-amber-300">driver.py</b> & <b className="text-amber-300">tests.yaml</b> not ready. 
+                    Click <b className="text-amber-300">Generate driver + tests.yaml</b>.
+                  </div>
+                )}
+              </div>
+
+              {/* Editor */}
+              {readyForEditor && activeFile && (
+                <div className="rounded-xl overflow-hidden border mb-4"
+                    style={{ borderColor: 'rgba(217, 158, 40, 0.2)' }}>
+                  <Editor
+                    height="420px"
+                    language={files.find((f) => f.name === activeFile)?.language || "plaintext"}
+                    theme="vs-dark"
+                    value={files.find((f) => f.name === activeFile)?.content || ""}
+                    onChange={(v) =>
+                      setFiles((prev) => prev.map((f) => (f.name === activeFile ? { ...f, content: v || "" } : f)))
+                    }
+                    options={{ minimap: { enabled: false }, fontSize: 14 }}
+                  />
                 </div>
               )}
-            </div>
 
-            {readyForEditor && activeFile && (
-              <Editor
-                height="420px"
-                language={files.find((f) => f.name === activeFile)?.language || "plaintext"}
-                theme="vs-dark"
-                value={files.find((f) => f.name === activeFile)?.content || ""}
-                onChange={(v) =>
-                  setFiles((prev) => prev.map((f) => (f.name === activeFile ? { ...f, content: v || "" } : f)))
-                }
-                options={{ minimap: { enabled: false }, fontSize: 14 }}
-              />
-            )}
+              {readyForEditor && (
+                <div className="flex gap-3 mb-5">
+                  <Btn onClick={saveAndApprove} disabled={busy || !projectName}>
+                    💾 Save & Approve
+                  </Btn>
+                  <Btn variant="primary" onClick={approveAndRun} disabled={busy || !projectName}>
+                    {busy ? "⏳ Starting…" : "▶️ Approve & Run"}
+                  </Btn>
+                  <Btn variant="ghost" onClick={loadEditorsFromPreProcessed} disabled={busy || !projectName}>
+                    🔄 Reload from S3
+                  </Btn>
+                </div>
+              )}
 
-            {readyForEditor && (
-              <div className="flex gap-2 mt-3">
-                <Btn onClick={saveAndApprove} disabled={busy || !projectName}>
-                  Save & Approve
-                </Btn>
-                <Btn variant="primary" onClick={approveAndRun} disabled={busy || !projectName}>
-                  {busy ? "Starting…" : "Approve & Run"}
-                </Btn>
-                <Btn variant="ghost" onClick={loadEditorsFromPreProcessed} disabled={busy || !projectName}>
-                  Reload from S3
-                </Btn>
-              </div>
-            )}
-          </Card>
-
-          <Card title="Results">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* metrics */}
-              <div>
-                <div className="text-sm mb-2">Metrics</div>
-                {metrics ? (
-                  <ResponsiveContainer width="100%" height={200}>
-                    <LineChart
-                      data={Object.entries(metrics).map(([k, v]) => ({ name: k, value: typeof v === "number" ? v : null }))}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" stroke="#555" />
-                      <XAxis dataKey="name" stroke="#aaa" />
-                      <YAxis stroke="#aaa" />
-                      <Tooltip formatter={(v) => (v == null ? "—" : Number(v).toFixed(4))} />
-                      <Line type="monotone" dataKey="value" stroke="#FFD700" />
-                    </LineChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="text-white/60 text-sm">No metrics yet.</div>
-                )}
-              </div>
-
-              {/* confusion matrix */}
-              <div>
-                <div className="text-sm mb-2">Confusion Matrix</div>
-                {confusionURL ? (
-                  <img src={confusionURL} alt="Confusion" className="max-h-60" />
-                ) : (
-                  <div className="text-white/60 text-sm">No confusion matrix.</div>
-                )}
-              </div>
-
-              {/* pass/fail summary */}
-              <div>
-                <div className="text-sm mb-2">Pass/Fail</div>
-                {(() => {
-                  const statusIdx = csvInfo.headers.findIndex((h) => {
-                    const hl = (h || "").toLowerCase();
-                    return hl === "status" || hl === "result";
-                  });
-                  if (statusIdx === -1) return <div className="text-white/60 text-sm">No summary.</div>;
-                  let pass = 0,
-                    fail = 0;
-                  csvInfo.rows.forEach((r) => {
-                    const v = (r[statusIdx] || "").toLowerCase();
-                    if (v.includes("pass")) pass++;
-                    else if (v.includes("fail")) fail++;
-                  });
-                  return (
-                    <ResponsiveContainer width="100%" height={200}>
-                      <PieChart>
-                        <Pie
-                          data={[
-                            { name: "Pass", value: pass },
-                            { name: "Fail", value: fail },
-                          ]}
-                          dataKey="value"
-                          outerRadius={80}
-                          label
-                        >
-                          <Cell fill="#22c55e" />
-                          <Cell fill="#ef4444" />
-                        </Pie>
-                      </PieChart>
-                    </ResponsiveContainer>
-                  );
-                })()}
-              </div>
-            </div>
-
-            {/* CSV table */}
-            <div className="mt-4">
-              <div className="flex items-center gap-2 mb-2">
-                <Input
-                  placeholder="Search scenarios…"
-                  value={csvSearch}
-                  onChange={(e) => {
-                    setCsvSearch(e.target.value);
-                    setCsvPage(1);
-                  }}
-                  className="w-64"
-                />
-                <div className="ml-auto text-xs text-white/60">
-                  Page {csvPage} / {Math.max(1, Math.ceil(filteredRows.length / pageSize))}
+              {/* Console Section */}
+              <div className="mt-5 pt-5 border-t" style={{ borderColor: 'rgba(217, 158, 40, 0.15)' }}>
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                    <span className="text-amber-400 text-xs">🖥️</span>
+                  </div>
+                  <div className="text-sm font-semibold text-amber-300/90">Console Output</div>
+                </div>
+                
+                <div className="rounded-xl p-4 border relative overflow-hidden"
+                    style={{ 
+                      background: 'rgba(0, 0, 0, 0.5)',
+                      borderColor: 'rgba(217, 158, 40, 0.2)'
+                    }}>
+                  <div className="absolute top-3 right-3 flex gap-1.5">
+                    <div className="w-2.5 h-2.5 rounded-full bg-red-500/50 shadow-lg shadow-red-500/20"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-amber-500/50 shadow-lg shadow-amber-500/20"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-green-500/50 shadow-lg shadow-green-500/20"></div>
+                  </div>
+                  <pre className="text-xs max-h-[300px] overflow-auto font-mono custom-scrollbar pt-6"
+                      style={{ color: '#a1a1aa' }}>
+        {runId ? consoleLines.join("\n") || "⚡ Streaming…" : "💤 Console appears after run starts"}
+                  </pre>
                 </div>
               </div>
-              <div className="overflow-auto border border-white/10 rounded">
-                <table className="min-w-full text-sm">
-                  <thead className="bg[#13131F] text-white/70">
-                    <tr>
-                      {csvInfo.headers.map((h, i) => (
-                        <th key={i} className="px-3 py-2 text-left border-b border-white/10">
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pageRows.map((row, rIdx) => {
-                      const resultIdx = csvInfo.headers.findIndex((h) => (h || "").toLowerCase() === "result");
-                      return (
-                        <tr key={rIdx} className="odd:bg-white/5">
-                          {row.map((cell, cIdx) => {
-                            const base = "px-3 py-2 border-b border-white/5";
-                            if (cIdx === resultIdx) {
-                              const v = String(cell || "").toLowerCase();
-                              const cls = v.includes("pass")
-                                ? "text-emerald-400 font-medium"
-                                : v.includes("fail")
-                                ? "text-rose-400 font-medium"
-                                : "text-white/80";
+            </div>
+          </div>
+
+          {/* Results Card */}
+          <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+              style={{ 
+                borderColor: 'rgba(217, 158, 40, 0.15)', 
+                background: 'rgba(15, 15, 24, 0.6)',
+                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+              }}>
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+                style={{
+                  background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+                  backgroundSize: '200% 100%',
+                  animation: 'shimmer 3s infinite'
+                }} />
+            
+            <div className="relative z-10">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-blue-500/20 border border-amber-400/30 flex items-center justify-center">
+                  <span className="text-amber-400 text-sm">📊</span>
+                </div>
+                <div className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300">
+                  Results Dashboard
+                </div>
+              </div>
+
+              {/* Metrics Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-6">
+                {/* Metrics Chart */}
+                <div className="rounded-xl p-4 border"
+                    style={{ 
+                      background: 'rgba(0, 0, 0, 0.3)',
+                      borderColor: 'rgba(217, 158, 40, 0.15)'
+                    }}>
+                  <div className="text-sm font-semibold mb-3 flex items-center gap-2">
+                    <span className="text-amber-400">📈</span>
+                    <span className="text-amber-300/90">Metrics</span>
+                  </div>
+                  {metrics ? (
+                    <ResponsiveContainer width="100%" height={200}>
+                      <LineChart
+                        data={Object.entries(metrics).map(([k, v]) => ({ name: k, value: typeof v === "number" ? v : null }))}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(217, 158, 40, 0.1)" />
+                        <XAxis dataKey="name" stroke="#d4af37" fontSize={11} />
+                        <YAxis stroke="#d4af37" fontSize={11} />
+                        <Tooltip 
+                          formatter={(v) => (v == null ? "—" : Number(v).toFixed(4))}
+                          contentStyle={{ 
+                            background: 'rgba(0, 0, 0, 0.95)', 
+                            border: '1px solid rgba(217, 158, 40, 0.3)',
+                            borderRadius: '8px'
+                          }}
+                          labelStyle={{ color: '#d4af37' }}
+                        />
+                        <Line type="monotone" dataKey="value" stroke="rgb(217, 158, 40)" strokeWidth={2.5} dot={{ fill: 'rgb(217, 158, 40)', r: 4 }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="text-white/60 text-sm text-center py-12">
+                      <div className="text-2xl mb-2 opacity-30">📊</div>
+                      No metrics yet.
+                    </div>
+                  )}
+                </div>
+
+                {/* Confusion Matrix */}
+                <div className="rounded-xl p-4 border"
+                    style={{ 
+                      background: 'rgba(0, 0, 0, 0.3)',
+                      borderColor: 'rgba(217, 158, 40, 0.15)'
+                    }}>
+                  <div className="text-sm font-semibold mb-3 flex items-center gap-2">
+                    <span className="text-amber-400">🎯</span>
+                    <span className="text-amber-300/90">Confusion Matrix</span>
+                  </div>
+                  {confusionURL ? (
+                    <img src={confusionURL} alt="Confusion" className="max-h-60 w-full object-contain rounded-lg" />
+                  ) : (
+                    <div className="text-white/60 text-sm text-center py-12">
+                      <div className="text-2xl mb-2 opacity-30">🎯</div>
+                      No confusion matrix.
+                    </div>
+                  )}
+                </div>
+
+                {/* Pass/Fail Chart */}
+                <div className="rounded-xl p-4 border"
+                    style={{ 
+                      background: 'rgba(0, 0, 0, 0.3)',
+                      borderColor: 'rgba(217, 158, 40, 0.15)'
+                    }}>
+                  <div className="text-sm font-semibold mb-3 flex items-center gap-2">
+                    <span className="text-amber-400">✓✗</span>
+                    <span className="text-amber-300/90">Pass/Fail</span>
+                  </div>
+                  {(() => {
+                    const statusIdx = csvInfo.headers.findIndex((h) => {
+                      const hl = (h || "").toLowerCase();
+                      return hl === "status" || hl === "result";
+                    });
+                    if (statusIdx === -1) return (
+                      <div className="text-white/60 text-sm text-center py-12">
+                        <div className="text-2xl mb-2 opacity-30">📋</div>
+                        No summary.
+                      </div>
+                    );
+                    let pass = 0, fail = 0;
+                    csvInfo.rows.forEach((r) => {
+                      const v = (r[statusIdx] || "").toLowerCase();
+                      if (v.includes("pass")) pass++;
+                      else if (v.includes("fail")) fail++;
+                    });
+                    return (
+                      <ResponsiveContainer width="100%" height={200}>
+                        <PieChart>
+                          <Pie
+                            data={[
+                              { name: "Pass", value: pass },
+                              { name: "Fail", value: fail },
+                            ]}
+                            dataKey="value"
+                            outerRadius={80}
+                            label
+                          >
+                            <Cell fill="#22c55e" />
+                            <Cell fill="#ef4444" />
+                          </Pie>
+                          <Tooltip 
+                            contentStyle={{ 
+                              background: 'rgba(0, 0, 0, 0.95)', 
+                              border: '1px solid rgba(217, 158, 40, 0.3)',
+                              borderRadius: '8px'
+                            }}
+                          />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    );
+                  })()}
+                </div>
+              </div>
+
+              {/* CSV Table */}
+              <div className="rounded-xl border p-4"
+                  style={{ 
+                    background: 'rgba(0, 0, 0, 0.3)',
+                    borderColor: 'rgba(217, 158, 40, 0.15)'
+                  }}>
+                <div className="flex items-center gap-3 mb-4">
+                  <Input
+                    placeholder="🔍 Search scenarios…"
+                    value={csvSearch}
+                    onChange={(e) => {
+                      setCsvSearch(e.target.value);
+                      setCsvPage(1);
+                    }}
+                    className="flex-1 max-w-sm bg-transparent border rounded-xl px-4 py-2.5 outline-none transition-all duration-300 focus:border-amber-400/40 focus:shadow-[0_0_0_3px_rgba(217,158,40,0.15)]"
+                    style={{ 
+                      borderColor: 'rgba(217, 158, 40, 0.2)',
+                      background: 'rgba(0, 0, 0, 0.3)',
+                      color: 'white'
+                    }}
+                  />
+                  <div className="ml-auto text-xs font-medium px-3 py-2 rounded-lg"
+                      style={{ 
+                        color: 'rgba(217, 158, 40, 0.8)',
+                        background: 'rgba(217, 158, 40, 0.05)',
+                        border: '1px solid rgba(217, 158, 40, 0.2)'
+                      }}>
+                    📄 Page {csvPage} / {Math.max(1, Math.ceil(filteredRows.length / pageSize))}
+                  </div>
+                </div>
+                
+                <div className="overflow-auto border rounded-xl custom-scrollbar"
+                    style={{ borderColor: 'rgba(217, 158, 40, 0.15)' }}>
+                  <table className="min-w-full text-sm">
+                    <thead style={{ background: 'rgba(217, 158, 40, 0.05)' }}>
+                      <tr>
+                        {csvInfo.headers.map((h, i) => (
+                          <th key={i} 
+                              className="px-4 py-3 text-left font-semibold border-b"
+                              style={{ 
+                                color: 'rgba(217, 158, 40, 0.9)',
+                                borderColor: 'rgba(217, 158, 40, 0.2)'
+                              }}>
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pageRows.map((row, rIdx) => {
+                        const resultIdx = csvInfo.headers.findIndex((h) => (h || "").toLowerCase() === "result");
+                        return (
+                          <tr key={rIdx} 
+                              className="transition-colors duration-150"
+                              style={{ 
+                                background: rIdx % 2 === 0 ? 'transparent' : 'rgba(217, 158, 40, 0.03)'
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(217, 158, 40, 0.08)'}
+                              onMouseLeave={(e) => e.currentTarget.style.background = rIdx % 2 === 0 ? 'transparent' : 'rgba(217, 158, 40, 0.03)'}>
+                            {row.map((cell, cIdx) => {
+                              const base = "px-4 py-3 border-b";
+                              if (cIdx === resultIdx) {
+                                const v = String(cell || "").toLowerCase();
+                                const cls = v.includes("pass")
+                                  ? "text-emerald-400 font-semibold"
+                                  : v.includes("fail")
+                                  ? "text-rose-400 font-semibold"
+                                  : "text-white/80";
+                                return (
+                                  <td key={cIdx} className={`${base} ${cls}`}
+                                      style={{ borderColor: 'rgba(217, 158, 40, 0.1)' }}>
+                                    {v.includes("pass") && "✓ "}{v.includes("fail") && "✗ "}{cell}
+                                  </td>
+                                );
+                              }
                               return (
-                                <td key={cIdx} className={`${base} ${cls}`}>
+                                <td key={cIdx} className={`${base} text-white/80`}
+                                    style={{ borderColor: 'rgba(217, 158, 40, 0.1)' }}>
                                   {cell}
                                 </td>
                               );
-                            }
-                            return (
-                              <td key={cIdx} className={`${base} text-white/80`}>
-                                {cell}
-                              </td>
-                            );
-                          })}
+                            })}
+                          </tr>
+                        );
+                      })}
+                      {!pageRows.length && (
+                        <tr>
+                          <td colSpan={csvInfo.headers.length || 1} className="px-4 py-12 text-center">
+                            <div className="text-white/60">
+                              <div className="text-2xl mb-2 opacity-30">📋</div>
+                              No rows found
+                            </div>
+                          </td>
                         </tr>
-                      );
-                    })}
-                    {!pageRows.length && (
-                      <tr>
-                        <td colSpan={csvInfo.headers.length || 1} className="px-3 py-2 text-white/60">
-                          No rows
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-              <div className="flex gap-2 mt-2">
-                <Btn onClick={() => setCsvPage((p) => Math.max(1, p - 1))} disabled={csvPage <= 1}>
-                  Prev
-                </Btn>
-                <Btn
-                  onClick={() =>
-                    setCsvPage((p) => Math.min(Math.ceil(filteredRows.length / pageSize), p + 1))
-                  }
-                  disabled={csvPage >= Math.ceil(filteredRows.length / pageSize)}
-                >
-                  Next
-                </Btn>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                
+                <div className="flex gap-2 mt-4">
+                  <Btn onClick={() => setCsvPage((p) => Math.max(1, p - 1))} disabled={csvPage <= 1}>
+                    ← Prev
+                  </Btn>
+                  <Btn
+                    onClick={() => setCsvPage((p) => Math.min(Math.ceil(filteredRows.length / pageSize), p + 1))}
+                    disabled={csvPage >= Math.ceil(filteredRows.length / pageSize)}
+                  >
+                    Next →
+                  </Btn>
+                </div>
               </div>
             </div>
-          </Card>
+          </div>
+
+          <style jsx>{`
+            @keyframes shimmer {
+              0% { background-position: -200% 0; }
+              100% { background-position: 200% 0; }
+            }
+            .custom-scrollbar::-webkit-scrollbar {
+              width: 6px;
+              height: 6px;
+            }
+            .custom-scrollbar::-webkit-scrollbar-track {
+              background: rgba(0, 0, 0, 0.2);
+              border-radius: 10px;
+            }
+            .custom-scrollbar::-webkit-scrollbar-thumb {
+              background: rgba(217, 158, 40, 0.3);
+              border-radius: 10px;
+            }
+            .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+              background: rgba(217, 158, 40, 0.5);
+            }
+          `}</style>
         </div>
       </div>
     </div>

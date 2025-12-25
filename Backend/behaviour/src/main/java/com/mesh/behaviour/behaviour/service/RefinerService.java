@@ -24,7 +24,7 @@ public class RefinerService {
     private final S3Service s3;
     private final LlmService llm;
     private final ProjectRepository projects;
-    private final RunService runService;                // still needed for autoRun
+    private final RunService runService; // still needed for autoRun
     private final ScenarioService scenarioService;
 
     private final ObjectMapper om = new ObjectMapper();
@@ -104,7 +104,7 @@ public class RefinerService {
         Map<String, Object> manifest = readJsonSafe(S3KeyUtil.join(versionBase, "manifest.json"));
         Set<String> issues = extractIssues(hints, manifest);
 
-        // Build context
+        // Build main context from preprocessed + version files
         String context = buildContextBundle(root, List.of(
                 "pre-processed/train.py",
                 "pre-processed/predict.py",
@@ -114,17 +114,38 @@ public class RefinerService {
         ));
         context += buildContextBundle(versionBase, List.of("driver.py", "tests.yaml"));
 
-        // ✅ Compose brief with ONLY the latest user prompt
+        // ✅ Include current tests.yaml directly in the context for Gemini
+        String currentTestsKey = S3KeyUtil.join(versionBase, "tests.yaml");
+        if (s3.exists(currentTestsKey)) {
+            try {
+                String prevYaml = s3.getString(currentTestsKey);
+                if (StringUtils.hasText(prevYaml)) {
+                    context += "\n\n===== BEGIN CURRENT TESTS.YAML =====\n"
+                            + prevYaml
+                            + "\n===== END CURRENT TESTS.YAML =====\n";
+                    log.info("[LLM] Included current tests.yaml from {}", currentTestsKey);
+                }
+            } catch (Exception e) {
+                log.warn("[LLM] Failed reading current tests.yaml from {}: {}", currentTestsKey, e.getMessage());
+            }
+        } else {
+            log.info("[LLM] No current tests.yaml found at {}", currentTestsKey);
+        }
+
+        // Build user brief
         String baseBrief = buildBrief(issues, metrics, manifest, userPrompt);
         String label = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        String refinedLabel = "behaviour-tests/refined_" + label;
 
-        // Generate tests.yaml with Gemini
+        // ✅ Send correct version base (v1/) to LLM, not behaviourBase
         Map<String, String> gen = llm.generateTestsOnlyToS3(
                 baseBrief,
                 context,
-                behaviourBase,
-                "refined_" + label
+                versionBase,
+                refinedLabel
         );
+
+        // Read the generated YAML
         String versionKey = gen.get("versionKey");
         String yaml = s3.getString(versionKey);
 
@@ -226,7 +247,6 @@ public class RefinerService {
 
         return b.toString();
     }
-
 
     private String safeString(Object o) {
         return o == null ? null : String.valueOf(o);

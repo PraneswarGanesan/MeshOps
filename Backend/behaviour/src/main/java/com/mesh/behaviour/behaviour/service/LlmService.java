@@ -50,22 +50,81 @@ public class LlmService {
     private String url;
 
     /* ================= TESTS ONLY ================= */
-
     public Map<String, String> generateTestsOnlyToS3(String brief,
                                                      String context,
                                                      String baseKey,
                                                      String label) {
         requireKeys();
 
+        // Derive project root
         String root = deriveProjectRootFromAnyKey(baseKey);
-        String versionBase = resolveVersionBaseKey(root, label);
 
-        // always rebuild augmented context
+        // ✅ Safely resolve versionBase path
+        String versionBase;
+        if (baseKey.contains("/behaviour-tests/")) {
+            int cut = baseKey.indexOf("/behaviour-tests/");
+            versionBase = baseKey.substring(0, cut);
+        } else if (baseKey.contains("/artifacts/versions/")) {
+            int cut = baseKey.indexOf("/artifacts/versions/") + "/artifacts/versions/".length();
+            int nextSlash = baseKey.indexOf("/", cut);
+            if (nextSlash != -1) {
+                versionBase = baseKey.substring(0, nextSlash);
+            } else {
+                versionBase = baseKey; // fallback if it ends at version folder
+            }
+        } else {
+            versionBase = resolveVersionBaseKey(root, label);
+        }
+
+        // ✅ Always rebuild augmented context (train.py, predict.py, dataset.csv, etc.)
         String augmentedContext = buildS3AugmentedContext(root, versionBase);
 
+        // ✅ Attach FULL current tests.yaml if exists
+        try {
+            String currentTestsKey = S3KeyUtil.join(versionBase, "tests.yaml");
+            if (s3.exists(currentTestsKey)) {
+                String currentYaml = s3.getString(currentTestsKey);
+                if (StringUtils.hasText(currentYaml)) {
+                    augmentedContext += "\n\n===== BEGIN CURRENT TESTS.YAML =====\n"
+                            + currentYaml
+                            + "\n===== END CURRENT TESTS.YAML =====\n";
+                    log.info("[LLM] Included current tests.yaml from {}", currentTestsKey);
+                } else {
+                    log.info("[LLM] Current tests.yaml is empty at {}", currentTestsKey);
+                }
+            } else {
+                log.info("[LLM] No current tests.yaml found at {}", currentTestsKey);
+            }
+        } catch (Exception e) {
+            log.warn("[LLM] Failed reading current tests.yaml: {}", e.getMessage());
+        }
+
+        // ✅ Attach FULL previous tests.yaml (if previous version folder exists)
+        try {
+            String prevVersionBase = findPreviousVersion(root, label);
+            if (prevVersionBase != null) {
+                String prevTestsKey = S3KeyUtil.join(prevVersionBase, "tests.yaml");
+                if (s3.exists(prevTestsKey)) {
+                    String prevYaml = s3.getString(prevTestsKey);
+                    if (StringUtils.hasText(prevYaml)) {
+                        augmentedContext += "\n\n===== BEGIN PREVIOUS TESTS.YAML =====\n"
+                                + prevYaml
+                                + "\n===== END PREVIOUS TESTS.YAML =====\n";
+                        log.info("[LLM] Included previous tests.yaml from {}", prevTestsKey);
+                    }
+                } else {
+                    log.info("[LLM] No previous tests.yaml found at {}", prevVersionBase);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[LLM] Failed to attach previous tests.yaml: {}", e.getMessage());
+        }
+
+        // ✅ Build LLM prompt with full context and user brief
         String prompt = buildTestsOnlyPrompt(brief, augmentedContext);
         log.info("=== [LLM] Prompt for tests.yaml (len={}) ===\n{}", prompt.length(), prompt);
 
+        // ✅ Call Gemini API
         String geminiResp = callGemini(prompt).block();
         if (!StringUtils.hasText(geminiResp)) {
             throw new RuntimeException("Gemini returned empty response for tests.yaml generation");
@@ -74,24 +133,25 @@ public class LlmService {
         String combined = extractAllTextFromGemini(geminiResp);
         log.info("=== [LLM] Raw Gemini Response ===\n{}", combined);
 
-        // Try fenced YAML first
+        // ✅ Extract YAML from Gemini response
         String tests = firstGroup("(?s)```(?:yaml|yml)\\s+(.*?)\\s*```", combined);
-
-        // If no fenced block, but raw starts with tests:, accept directly
         if (!StringUtils.hasText(tests) && combined.trim().startsWith("tests:")) {
             tests = combined.trim();
         }
 
-        // If still empty, fallback
+        // ❌ Fail if Gemini returns invalid YAML
         if (!StringUtils.hasText(tests)) {
-            tests = "tests:\n  - name: fallback\n    run: echo 'LLM failed to generate tests.yaml'\n";
+            throw new RuntimeException("Gemini did not return valid tests.yaml content");
         }
 
+        // ✅ Save refined YAML to S3
         String versionKey = S3KeyUtil.join(baseKey, label + ".yaml");
         s3.putString(versionKey, cleanBlock(tests), "text/yaml");
+        log.info("[LLM] Saved refined tests.yaml at {}", versionKey);
 
         return Map.of("versionKey", versionKey);
     }
+
 
 
     /* ================= DRIVER + TESTS ================= */
@@ -211,6 +271,8 @@ tests:
     "name"
     "input"     – must be chosen ONLY from the dataset paths listed in CONTEXT  
                   and written exactly as shown there, but with the leading "pre-processed/" removed
+                  and follow the formate given by the tests.yaml file which is pasted no devation from the current structure
+                  read the datasets and pre-processed folder before adding the inputs 
     "expected"  – must be one of: "non_empty", "model_saved", or a valid class label (e.g. "cat", "dog")
     "category"  – e.g. "functional", "robustness", "data_integrity"
     "severity"  – one of: "low", "medium", "high", "critical"

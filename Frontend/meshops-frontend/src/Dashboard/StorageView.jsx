@@ -394,220 +394,353 @@ export default function StorageView() {
   };
 
   /* ----- UI ----- */
-  return (
-    <div className="min-h-screen" style={{ background: COLORS.bg, color: "white" }}>
-      {/* ambient glow */}
-      <div
-        className="pointer-events-none fixed inset-0 blur-3xl opacity-40"
-        style={{ background:
-          `radial-gradient(600px 300px at 85% 10%, ${COLORS.goldGlow}, transparent),
-           radial-gradient(400px 220px at 10% 40%, rgba(255,255,255,0.05), transparent)` }}
-      />
+return (
+  <div className="min-h-screen relative overflow-hidden" style={{ background: 'linear-gradient(to bottom, #0a0a0f 0%, #0f0f18 50%, #0a0a0f 100%)' }}>
+    {/* Enhanced ambient glow with golden-blue theme */}
+    <div className="pointer-events-none fixed inset-0 opacity-30">
+      <div className="absolute inset-0 blur-[120px]" 
+           style={{ background: 'radial-gradient(800px 400px at 80% 10%, rgba(217, 158, 40, 0.15), transparent)' }} />
+      <div className="absolute inset-0 blur-[100px]" 
+           style={{ background: 'radial-gradient(600px 350px at 20% 60%, rgba(59, 130, 246, 0.12), transparent)' }} />
+      <div className="absolute inset-0 blur-[80px]" 
+           style={{ background: 'radial-gradient(500px 300px at 90% 80%, rgba(168, 85, 247, 0.08), transparent)' }} />
+    </div>
 
-      {/* top bar */}
-      <div className="sticky top-0 z-20 border-b"
-           style={{ borderColor: COLORS.border, background: "rgba(11,11,18,0.7)" }}>
-        <div className="max-w-7xl mx-auto px-5 py-3 flex items-center gap-3">
-          <Badge>User: <b className="ml-1 text-white">{username}</b></Badge>
-          <Badge>Storage Studio</Badge>
-          <div className="ml-auto text-xs" style={{ color: COLORS.textSoft }}>{status}</div>
+    {/* Animated gradient mesh overlay */}
+    <div className="pointer-events-none fixed inset-0 opacity-20"
+         style={{ 
+           backgroundImage: 'radial-gradient(circle at 20% 50%, rgba(217, 158, 40, 0.1) 0%, transparent 50%), radial-gradient(circle at 80% 80%, rgba(59, 130, 246, 0.1) 0%, transparent 50%)',
+           backgroundSize: '100% 100%',
+           animation: 'float 20s ease-in-out infinite'
+         }} />
+
+    {/* Premium top bar with glassmorphism */}
+    <div className="sticky top-0 z-20 border-b backdrop-blur-xl"
+         style={{ 
+           borderColor: 'rgba(217, 158, 40, 0.1)', 
+           background: 'rgba(10, 10, 15, 0.8)',
+           boxShadow: '0 4px 24px rgba(0, 0, 0, 0.3)'
+         }}>
+      <div className="max-w-7xl mx-auto px-6 py-4 flex items-center gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 via-amber-600 to-blue-600 shadow-lg shadow-amber-500/30 flex items-center justify-center">
+            <span className="text-white font-bold text-sm">S</span>
+          </div>
+          <div>
+            <div className="text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-amber-200 to-blue-300 font-bold tracking-wide text-sm">
+              Storage Studio
+            </div>
+          </div>
+        </div>
+        <div className="ml-2 px-3 py-1.5 rounded-lg border text-xs font-medium"
+             style={{ 
+               borderColor: 'rgba(217, 158, 40, 0.2)', 
+               background: 'rgba(217, 158, 40, 0.05)',
+               color: '#d4af37'
+             }}>
+          <span className="opacity-70">User:</span> <b className="ml-1 text-white">{username}</b>
+        </div>
+        <div className="ml-auto text-xs font-medium px-3 py-1.5 rounded-lg" 
+             style={{ 
+               color: 'rgba(255, 255, 255, 0.5)',
+               background: 'rgba(255, 255, 255, 0.03)'
+             }}>
+          {status}
+        </div>
+      </div>
+    </div>
+
+    <div className="relative z-10 max-w-7xl mx-auto grid gap-6 px-6 py-8">
+      {/* PREMIUM SUMMARY PANEL */}
+      <div className="rounded-2xl p-6 border backdrop-blur-sm relative overflow-hidden group"
+           style={{ 
+             borderColor: 'rgba(217, 158, 40, 0.15)', 
+             background: 'rgba(15, 15, 24, 0.6)',
+             boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+           }}>
+        {/* Subtle shimmer effect */}
+        <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700"
+             style={{
+               background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+               backgroundSize: '200% 100%',
+               animation: 'shimmer 3s infinite'
+             }} />
+        
+        <div className="relative z-10 grid gap-6 lg:grid-cols-[1.2fr_1fr]">
+          {/* Left: Enhanced controls */}
+          <div>
+            <div className="grid md:grid-cols-3 gap-4">
+              {/* Project Selector */}
+              <div>
+                <div className="text-[10px] uppercase tracking-widest mb-2 font-semibold" 
+                     style={{ color: 'rgba(217, 158, 40, 0.7)' }}>Project</div>
+                <div className="relative flex items-center gap-2">
+                  <select
+                    className="w-full appearance-none rounded-xl px-4 py-2.5 pr-10 bg-transparent border outline-none transition-all duration-300 focus:border-amber-400/40 focus:shadow-[0_0_0_3px_rgba(217,158,40,0.15)]"
+                    style={{ 
+                      borderColor: 'rgba(217, 158, 40, 0.2)', 
+                      color: 'white',
+                      background: 'rgba(0, 0, 0, 0.3)'
+                    }}
+                    value={project}
+                    onChange={(e)=>{ setProject(e.target.value); setPath(""); }}
+                  >
+                    {projects.length===0 && <option value="">No projects</option>}
+                    {projects.map((p)=>(<option key={p} value={p} className="bg-black">{p}</option>))}
+                  </select>
+                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 opacity-70 text-amber-300">
+                    <Icon.ChevronR/>
+                  </span>
+                  <button onClick={createNewProject} 
+                          className="px-4 py-2.5 rounded-xl border text-xs font-semibold transition-all duration-300 hover:scale-105 hover:shadow-lg active:scale-95"
+                          style={{ 
+                            borderColor: 'rgba(217, 158, 40, 0.3)',
+                            background: 'linear-gradient(135deg, rgba(217, 158, 40, 0.1), rgba(59, 130, 246, 0.05))',
+                            color: '#d4af37',
+                            boxShadow: '0 0 20px rgba(217, 158, 40, 0.1)'
+                          }}>
+                    New
+                  </button>
+                </div>
+              </div>
+
+              {/* Folder Path */}
+              <div>
+                <div className="text-[10px] uppercase tracking-widest mb-2 font-semibold" 
+                     style={{ color: 'rgba(217, 158, 40, 0.7)' }}>Folder</div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 rounded-xl px-4 py-2.5 border backdrop-blur-sm"
+                       style={{ 
+                         borderColor: 'rgba(217, 158, 40, 0.2)', 
+                         color: 'rgba(255, 255, 255, 0.6)',
+                         background: 'rgba(0, 0, 0, 0.3)'
+                       }}>
+                    /{project}{path?`/${path}`:""}
+                  </div>
+                  {path && (
+                    <button onClick={up} 
+                            className="px-4 py-2.5 rounded-xl border font-medium transition-all duration-300 hover:scale-105 active:scale-95"
+                            style={{ 
+                              borderColor: 'rgba(217, 158, 40, 0.2)',
+                              background: 'rgba(217, 158, 40, 0.05)',
+                              color: '#d4af37'
+                            }}>
+                      Up
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Search */}
+              <div>
+                <div className="text-[10px] uppercase tracking-widest mb-2 font-semibold" 
+                     style={{ color: 'rgba(217, 158, 40, 0.7)' }}>Search</div>
+                <div className="relative">
+                  <input className="w-full rounded-xl px-10 py-2.5 bg-transparent border outline-none transition-all duration-300 focus:border-amber-400/40 focus:shadow-[0_0_0_3px_rgba(217,158,40,0.15)]"
+                         style={{ 
+                           borderColor: 'rgba(217, 158, 40, 0.2)', 
+                           color: 'white',
+                           background: 'rgba(0, 0, 0, 0.3)'
+                         }} 
+                         placeholder="Type to filter…"
+                         value={query} 
+                         onChange={(e)=>setQuery(e.target.value)} />
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-amber-400/70"><Icon.Search/></span>
+                </div>
+              </div>
+            </div>
+
+            {/* Premium stats chips */}
+            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs font-medium">
+              {[
+                { label: 'Projects', value: stats.projects },
+                { label: 'In folder', value: stats.inFolder },
+                { label: 'Folders', value: stats.folderCount },
+                { label: 'Files', value: stats.fileCount },
+                { label: 'Code', value: stats.byType.code },
+                { label: 'Images', value: stats.byType.images },
+                { label: 'Data', value: stats.byType.data },
+                { label: 'Docs', value: stats.byType.docs }
+              ].map((stat, i) => (
+                <span key={i} className="px-3 py-1.5 rounded-lg border backdrop-blur-sm transition-all duration-300 hover:scale-105" 
+                      style={{ 
+                        borderColor: 'rgba(217, 158, 40, 0.15)',
+                        background: 'rgba(217, 158, 40, 0.05)',
+                        color: 'rgba(255, 255, 255, 0.6)'
+                      }}>
+                  {stat.label}: <b className="text-transparent bg-clip-text bg-gradient-to-r from-amber-300 to-blue-300 ml-1">{stat.value}</b>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Right: Enhanced donut + graph */}
+          <div className="flex flex-col items-end gap-4">
+            <Donut percent={stats.codePct} label={`${stats.byType.code}/${stats.fileCount} files are code`} />
+            <div className="w-full max-w-sm rounded-xl border p-4 backdrop-blur-sm"
+                 style={{ 
+                   borderColor: 'rgba(217, 158, 40, 0.15)', 
+                   background: 'rgba(0, 0, 0, 0.3)'
+                 }}>
+              <div className="text-[10px] uppercase tracking-widest mb-2 font-semibold" 
+                   style={{ color: 'rgba(217, 158, 40, 0.7)' }}>
+                Folder Activity 
+              </div>
+              <UsageGraph seed={stats.byType} />
+            </div>
+          </div>
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto grid gap-6 px-5 py-6">
-        {/* SUMMARY BAR */}
-        <div className="rounded-2xl p-4 border"
-             style={{ borderColor: COLORS.border, background: COLORS.panel }}>
-          <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
-            {/* left: controls + quick stats */}
-            <div>
-              <div className="grid md:grid-cols-3 gap-3">
-                <div>
-                  <div className="text-[11px] uppercase tracking-wider" style={{ color: COLORS.textSoft }}>Project</div>
-                  <div className="relative flex items-center gap-2">
-                    <select
-                      className="w-full appearance-none rounded-xl px-3 py-2 pr-10 bg-transparent border outline-none transition focus:shadow-[0_0_0_3px_rgba(212,175,55,0.25)]"
-                      style={{ borderColor: COLORS.border, color: "white" }}
-                      value={project}
-                      onChange={(e)=>{ setProject(e.target.value); setPath(""); }}
-                    >
-                      {projects.length===0 && <option value="">No projects</option>}
-                      {projects.map((p)=>(<option key={p} value={p} className="bg-black">{p}</option>))}
-                    </select>
-                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 opacity-70"><Icon.ChevronR/></span>
-                    <button onClick={createNewProject} className="px-3 py-2 rounded-xl border text-xs"
-                            style={{ borderColor: COLORS.border }}>
-                      New Project
-                    </button>
+      {/* PREMIUM BROWSER TABLE */}
+      <div className="rounded-2xl overflow-hidden border backdrop-blur-sm relative group"
+           style={{ 
+             borderColor: 'rgba(217, 158, 40, 0.15)', 
+             background: 'rgba(15, 15, 24, 0.6)',
+             boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
+           }}>
+        {/* Shimmer effect */}
+        <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+             style={{
+               background: 'linear-gradient(110deg, transparent 30%, rgba(217, 158, 40, 0.03) 50%, transparent 70%)',
+               backgroundSize: '200% 100%',
+               animation: 'shimmer 3s infinite'
+             }} />
+
+        {/* Upload bar */}
+        <div className="relative z-10 p-5 border-b backdrop-blur-sm" 
+             style={{ 
+               borderColor: 'rgba(217, 158, 40, 0.15)',
+               background: 'rgba(0, 0, 0, 0.2)'
+             }}>
+          <div className="flex items-center gap-4">
+            <label className="cursor-pointer">
+              <input type="file" className="hidden" onChange={onUpload} />
+              <span className={`inline-block px-5 py-2.5 rounded-xl border text-xs font-semibold transition-all duration-300 ${uploading?"opacity-60 cursor-not-allowed":"hover:scale-105 hover:shadow-lg active:scale-95"}`}
+                    style={{ 
+                      borderColor: 'rgba(217, 158, 40, 0.3)',
+                      background: 'linear-gradient(135deg, rgba(217, 158, 40, 0.15), rgba(59, 130, 246, 0.1))',
+                      color: '#d4af37',
+                      boxShadow: '0 0 20px rgba(217, 158, 40, 0.15)'
+                    }}>
+                {uploading?"Uploading…":"Upload File"}
+              </span>
+            </label>
+            <div className="text-xs ml-auto font-medium" style={{ color: 'rgba(255, 255, 255, 0.4)' }}>
+              Folders can't be uploaded or deleted from here.
+            </div>
+          </div>
+        </div>
+
+        {/* Table header */}
+        <div className="relative z-10 grid grid-cols-[1fr_120px_160px] px-6 py-3 text-[10px] uppercase tracking-widest font-semibold border-b"
+             style={{ 
+               color: 'rgba(217, 158, 40, 0.7)', 
+               borderColor: 'rgba(217, 158, 40, 0.15)',
+               background: 'rgba(0, 0, 0, 0.2)'
+             }}>
+          <span>Name</span><span>Type</span><span className="text-right">Actions</span>
+        </div>
+
+        {/* Table rows */}
+        {!project ? (
+          <div className="relative z-10 p-12 text-center" style={{ color: 'rgba(255, 255, 255, 0.4)' }}>
+            Select a project to view files.
+          </div>
+        ) : loading ? (
+          <div className="relative z-10 p-12 text-center" style={{ color: 'rgba(255, 255, 255, 0.4)' }}>
+            Loading…
+          </div>
+        ) : (
+          <div className="relative z-10">
+            {path && (
+              <div className="grid grid-cols-[1fr_120px_160px] px-6 py-3 border-b cursor-pointer transition-all duration-200"
+                   style={{ borderColor: 'rgba(217, 158, 40, 0.1)' }}
+                   onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(217, 158, 40, 0.05)'}
+                   onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                   onClick={up}>
+                <span className="text-white/80">↩️ ..</span>
+                <span className="text-white/50">—</span>
+                <span />
+              </div>
+            )}
+            {list.length ? list.map((it) => {
+              const e = it.isDir ? "" : ext(it.name);
+              const tag = it.isDir ? "folder" :
+                CODE_EXT.has(e) ? "code" :
+                IMG_EXT.has(e)  ? "image" :
+                DATA_EXT.has(e) ? "data" :
+                DOC_EXT.has(e)  ? "doc" : "file";
+              return (
+                <div key={`row:${it.name}`}
+                     className="grid grid-cols-[1fr_120px_160px] px-6 py-3 border-b transition-all duration-200"
+                     style={{ borderColor: 'rgba(217, 158, 40, 0.1)' }}
+                     onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(217, 158, 40, 0.05)'}
+                     onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="text-amber-400/70">
+                      {it.isDir ? <Icon.Folder/> : <Icon.File/>}
+                    </span>
+                    {it.isDir ? (
+                      <button className="truncate text-left hover:text-amber-300 transition-colors duration-200 text-white/90" 
+                              onClick={()=>enter(it.name)}>
+                        {it.name.replace(/\/$/, "")}
+                      </button>
+                    ) : (
+                      <button className="truncate text-left hover:text-amber-300 transition-colors duration-200 text-white/90" 
+                              onClick={()=>openEditor(it.name)}>
+                        {it.name}
+                      </button>
+                    )}
                   </div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase tracking-wider" style={{ color: COLORS.textSoft }}>Folder</div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 rounded-xl px-3 py-2 border"
-                         style={{ borderColor: COLORS.border, color: COLORS.textSoft }}>
-                      /{project}{path?`/${path}`:""}
-                    </div>
-                    {path && (
-                      <button onClick={up} className="px-3 py-2 rounded-xl border"
-                              style={{ borderColor: COLORS.border }}>Up</button>
+                  <div className="text-white/60 text-sm font-medium">{tag}</div>
+                  <div className="flex items-center justify-end gap-1">
+                    {!it.isDir && (
+                      <>
+                        <IconBtn title="View / Edit" onClick={()=>openEditor(it.name)}><Icon.Edit/></IconBtn>
+                        <IconBtn title="Download" onClick={()=>doDownload(it.name)}><Icon.Download/></IconBtn>
+                        <IconBtn title="Delete file" className="hover:bg-red-500/10"
+                                 onClick={()=>{ if (confirm(`Delete "${it.name}"?`)) doDelete(it.name, it.isDir); }}>
+                          <Icon.Trash/>
+                        </IconBtn>
+                      </>
+                    )}
+                    {it.isDir && (
+                      <IconBtn title="Open" onClick={()=>enter(it.name)}><Icon.ChevronR/></IconBtn>
                     )}
                   </div>
                 </div>
-                <div>
-                  <div className="text-[11px] uppercase tracking-wider" style={{ color: COLORS.textSoft }}>Search</div>
-                  <div className="relative">
-                    <input className="w-full rounded-xl px-8 py-2 bg-transparent border outline-none"
-                           style={{ borderColor: COLORS.border, color: "white" }} placeholder="Type to filter…"
-                           value={query} onChange={(e)=>setQuery(e.target.value)} />
-                    <span className="absolute left-2 top-1/2 -translate-y-1/2 opacity-70"><Icon.Search/></span>
-                  </div>
-                </div>
-              </div>
-
-              {/* quick stats chips */}
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs" style={{ color: COLORS.textSoft }}>
-                <span className="px-2 py-1 rounded border" style={{ borderColor: COLORS.border }}>
-                  Projects: <b className="text-white ml-1">{stats.projects}</b>
-                </span>
-                <span className="px-2 py-1 rounded border" style={{ borderColor: COLORS.border }}>
-                  In folder: <b className="text-white ml-1">{stats.inFolder}</b>
-                </span>
-                <span className="px-2 py-1 rounded border" style={{ borderColor: COLORS.border }}>
-                  Folders: <b className="text-white ml-1">{stats.folderCount}</b>
-                </span>
-                <span className="px-2 py-1 rounded border" style={{ borderColor: COLORS.border }}>
-                  Files: <b className="text-white ml-1">{stats.fileCount}</b>
-                </span>
-                <span className="px-2 py-1 rounded border" style={{ borderColor: COLORS.border }}>
-                  Code: <b className="text-white ml-1">{stats.byType.code}</b>
-                </span>
-                <span className="px-2 py-1 rounded border" style={{ borderColor: COLORS.border }}>
-                  Images: <b className="text-white ml-1">{stats.byType.images}</b>
-                </span>
-                <span className="px-2 py-1 rounded border" style={{ borderColor: COLORS.border }}>
-                  Data: <b className="text-white ml-1">{stats.byType.data}</b>
-                </span>
-                <span className="px-2 py-1 rounded border" style={{ borderColor: COLORS.border }}>
-                  Docs: <b className="text-white ml-1">{stats.byType.docs}</b>
-                </span>
-              </div>
-            </div>
-
-            {/* right: donut + usage graph */}
-            <div className="flex flex-col items-end gap-3">
-              <Donut percent={stats.codePct} label={`${stats.byType.code}/${stats.fileCount} files are code`} />
-              <div className="w-full max-w-sm rounded-xl border p-2"
-                   style={{ borderColor: COLORS.border, background: COLORS.panelAlt }}>
-                <div className="text-[11px] uppercase tracking-wider mb-1" style={{ color: COLORS.textSoft }}>
-                  Folder Activity 
-                </div>
-                <UsageGraph seed={stats.byType} />
-              </div>
-            </div>
+              );
+            }) : (
+              <div className="p-10 text-center text-white/40">This folder is empty.</div>
+            )}
           </div>
-        </div>
-
-        {/* MAIN: Browser table */}
-        <div className="rounded-2xl overflow-hidden border"
-             style={{ borderColor: COLORS.border, background: COLORS.panel }}>
-          {/* upload bar */}
-          <div className="p-4 border-b" style={{ borderColor: COLORS.border }}>
-            <div className="flex items-center gap-3">
-              <label className="cursor-pointer">
-                <input type="file" className="hidden" onChange={onUpload} />
-                <span className={`px-3 py-2 rounded-xl border text-xs ${uploading?"opacity-60 cursor-not-allowed":""}`}
-                      style={{ borderColor: COLORS.border }}>
-                  {uploading?"Uploading…":"Upload File"}
-                </span>
-              </label>
-              <div className="text-xs ml-auto" style={{ color: COLORS.textSoft }}>
-                Folders can’t be uploaded or deleted from here.
-              </div>
-            </div>
-          </div>
-
-          {/* header */}
-          <div className="grid grid-cols-[1fr_120px_160px] px-4 py-2 text-xs uppercase tracking-wider border-b"
-               style={{ color: COLORS.textSoft, borderColor: COLORS.border }}>
-            <span>Name</span><span>Type</span><span className="text-right">Actions</span>
-          </div>
-
-          {/* rows */}
-          {!project ? (
-            <div className="p-10" style={{ color: COLORS.textSoft }}>Select a project to view files.</div>
-          ) : loading ? (
-            <div className="p-10" style={{ color: COLORS.textSoft }}>Loading…</div>
-          ) : (
-            <div>
-              {path && (
-                <div className="grid grid-cols-[1fr_120px_160px] px-4 py-2 border-b hover:bg-white/5 cursor-pointer"
-                     style={{ borderColor: COLORS.border }} onClick={up}>
-                  <span className="text-white/80">↩️ ..</span>
-                  <span className="text-white/50">—</span>
-                  <span />
-                </div>
-              )}
-              {list.length ? list.map((it) => {
-                const e = it.isDir ? "" : ext(it.name);
-                const tag = it.isDir ? "folder" :
-                  CODE_EXT.has(e) ? "code" :
-                  IMG_EXT.has(e)  ? "image" :
-                  DATA_EXT.has(e) ? "data" :
-                  DOC_EXT.has(e)  ? "doc" : "file";
-                return (
-                  <div key={`row:${it.name}`}
-                       className="grid grid-cols-[1fr_120px_160px] px-4 py-2 border-b hover:bg-white/5"
-                       style={{ borderColor: COLORS.border }}>
-                    <div className="flex items-center gap-2 min-w-0">
-                      {it.isDir ? <Icon.Folder/> : <Icon.File/>}
-                      {it.isDir ? (
-                        <button className="truncate text-left hover:underline" onClick={()=>enter(it.name)}>
-                          {it.name.replace(/\/$/, "")}
-                        </button>
-                      ) : (
-                        <button className="truncate text-left hover:underline" onClick={()=>openEditor(it.name)}>
-                          {it.name}
-                        </button>
-                      )}
-                    </div>
-                    <div className="text-white/70">{tag}</div>
-                    <div className="flex items-center justify-end gap-1">
-                      {!it.isDir && (
-                        <>
-                          <IconBtn title="View / Edit" onClick={()=>openEditor(it.name)}><Icon.Edit/></IconBtn>
-                          <IconBtn title="Download" onClick={()=>doDownload(it.name)}><Icon.Download/></IconBtn>
-                          <IconBtn title="Delete file" className="hover:bg-red-500/10"
-                                   onClick={()=>{ if (confirm(`Delete "${it.name}"?`)) doDelete(it.name, it.isDir); }}>
-                            <Icon.Trash/>
-                          </IconBtn>
-                        </>
-                      )}
-                      {it.isDir && (
-                        <IconBtn title="Open" onClick={()=>enter(it.name)}><Icon.ChevronR/></IconBtn>
-                      )}
-                    </div>
-                  </div>
-                );
-              }) : (
-                <div className="p-8 text-white/50">This folder is empty.</div>
-              )}
-            </div>
-          )}
-        </div>
+        )}
       </div>
-
-      {/* Monaco Editor Modal */}
-      <ModalEditor
-        open={modalOpen}
-        fileName={modalName}
-        language={modalLang}
-        value={modalText}
-        onChange={setModalText}
-        onClose={()=>setModalOpen(false)}
-        onSave={saveEditor}
-        saving={saving}
-      />
     </div>
-  );
+
+    {/* Monaco Editor Modal */}
+    <ModalEditor
+      open={modalOpen}
+      fileName={modalName}
+      language={modalLang}
+      value={modalText}
+      onChange={setModalText}
+      onClose={()=>setModalOpen(false)}
+      onSave={saveEditor}
+      saving={saving}
+    />
+
+    <style jsx>{`
+      @keyframes shimmer {
+        0% { background-position: -200% 0; }
+        100% { background-position: 200% 0; }
+      }
+      @keyframes float {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-20px); }
+      }
+    `}</style>
+  </div>
+);
 }
