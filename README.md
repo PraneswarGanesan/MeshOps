@@ -1,4 +1,4 @@
-# Automesh.ai 🚀  
+# Meshops.ai 🚀  
 AI-Powered MLOps Testing & Deployment Platform
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
@@ -7,7 +7,7 @@ AI-Powered MLOps Testing & Deployment Platform
 
 ## 🌐 Overview
 
-**Automesh.ai** is an end-to-end cloud-based MLOps testing platform that leverages the power of **Large Language Models (LLMs)** to automatically generate, test, and validate ML models in isolated sandbox environments. It replaces traditional testers by providing automated **unit testing**, **behavioral testing**, **integration testing**, and **feedback loop integration**—all in one intelligent dashboard.
+**meshops.ai** is an end-to-end cloud-based MLOps testing platform that leverages the power of **Large Language Models (LLMs)** to automatically generate, test, and validate ML models in isolated sandbox environments. It replaces traditional testers by providing automated **unit testing**, **behavioral testing**, **integration testing**, and **feedback loop integration**—all in one intelligent dashboard.
 
 This platform is designed to help ML practitioners, students, and enterprises test their models efficiently without writing a single line of test code manually.
 
@@ -78,4 +78,4 @@ This platform is designed to help ML practitioners, students, and enterprises te
 
 1. Clone the repo:
    ```bash
-   git clone https://github.com/PraneswarGanesan/automesh.ai.git
+   git clone https://github.com/PraneswarGanesan/meshops.ai.git
